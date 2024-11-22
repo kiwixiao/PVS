@@ -1,0 +1,27 @@
+2024-11-21 16:38:09,183 - main - INFO - Starting vessel segmentation for case: PA005_ct
+2024-11-21 16:38:09,186 - main - INFO - Running standard pipeline
+2024-11-21 16:38:09,186 - vessel_seg_PA005_ct - INFO - Initializing segmenter with config: {'scale_range': {'min_vessel_size': 0.5, 'max_vessel_size': 14.0, 'num_scales': 1}, 'hessian': {'method': 'standard', 'user_interpolation': True}, 'frangi_filter': {'alpha': 0.5, 'beta': 0.5, 'c': 500}, 'scale_integration': {'method': 'max', 'weights': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]}}
+2024-11-21 16:38:09,186 - vessel_segmentation.processing.segmentation - INFO - VesselSegmenter received config: {'scale_range': {'min_vessel_size': 0.5, 'max_vessel_size': 14.0, 'num_scales': 1}, 'hessian': {'method': 'standard', 'user_interpolation': True}, 'frangi_filter': {'alpha': 0.5, 'beta': 0.5, 'c': 500}, 'scale_integration': {'method': 'max', 'weights': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]}}
+2024-11-21 16:38:09,186 - vessel_segmentation.processing.segmentation - INFO - Initialized VesselSegmenter with parameters: min_size=0.5, max_size=14.0, num_scales=1
+2024-11-21 16:38:09,187 - vessel_seg_PA005_ct - INFO - Starting vessel segmentation for case PA005_ct
+2024-11-21 16:38:09,188 - vessel_seg_PA005_ct - INFO - Using existing preprocessed data
+2024-11-21 16:38:10,358 - vessel_seg_PA005_ct - INFO - Loaded preprocessed data: shape=(552, 552, 430), voxel_size=0.6mm
+2024-11-21 16:38:10,358 - vessel_seg_PA005_ct - INFO - Computing vesselness
+2024-11-21 16:39:02,487 - vessel_segmentation.core.hessian_processor - INFO - Computing Hessian at scale 0.4166666666666667
+2024-11-21 16:47:36,487 - vessel_segmentation.processing.segmentation - ERROR - Error computing vesselness: 'VesselSegmenter' object has no attribute 'c'
+2024-11-21 16:47:36,488 - vessel_seg_PA005_ct - ERROR - Pipeline failed: 'VesselSegmenter' object has no attribute 'c'
+2024-11-21 16:47:36,488 - main - ERROR - Error during processing: 'VesselSegmenter' object has no attribute 'c'
+Traceback (most recent call last):
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/main.py", line 136, in main
+    results = pipeline.run()
+              ^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/pipeline.py", line 156, in run
+    vesselness, eigenvalues, vessel_particles = self.segmenter.compute_vesselness(
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/processing/segmentation.py", line 103, in compute_vesselness
+    vesselness_scale = self._frangi_filter(lambda1, lambda2, lambda3, sigma)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/processing/segmentation.py", line 159, in _frangi_filter
+    (1 - np.exp(-S[vessel_mask]**2 / (2 * self.c**2)))
+                                          ^^^^^^
+AttributeError: 'VesselSegmenter' object has no attribute 'c'

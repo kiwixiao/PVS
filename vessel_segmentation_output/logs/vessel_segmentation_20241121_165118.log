@@ -1,0 +1,15 @@
+2024-11-21 16:51:18,651 - main - INFO - Starting vessel segmentation for case: PA005_ct
+2024-11-21 16:51:18,654 - main - INFO - Running standard pipeline
+2024-11-21 16:51:18,654 - vessel_seg_PA005_ct - INFO - Initializing segmenter with config: {'scale_range': {'min_vessel_size': 0.5, 'max_vessel_size': 14.0, 'num_scales': 1}, 'hessian': {'method': 'standard', 'user_interpolation': True}, 'frangi_filter': {'alpha': 0.5, 'beta': 0.5, 'c': 500}, 'scale_integration': {'method': 'max', 'weights': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]}}
+2024-11-21 16:51:18,654 - vessel_segmentation.processing.segmentation - INFO - VesselSegmenter received config: {'scale_range': {'min_vessel_size': 0.5, 'max_vessel_size': 14.0, 'num_scales': 1}, 'hessian': {'method': 'standard', 'user_interpolation': True}, 'frangi_filter': {'alpha': 0.5, 'beta': 0.5, 'c': 500}, 'scale_integration': {'method': 'max', 'weights': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]}}
+2024-11-21 16:51:18,655 - vessel_segmentation.processing.segmentation - INFO - Initialized VesselSegmenter with parameters: min_size=0.5, max_size=14.0, num_scales=1
+2024-11-21 16:51:18,655 - vessel_seg_PA005_ct - INFO - Starting vessel segmentation for case PA005_ct
+2024-11-21 16:51:18,655 - vessel_seg_PA005_ct - INFO - Using existing preprocessed data
+2024-11-21 16:51:19,726 - vessel_seg_PA005_ct - INFO - Loaded preprocessed data: shape=(552, 552, 430), voxel_size=0.6mm
+2024-11-21 16:51:19,726 - vessel_seg_PA005_ct - INFO - Computing vesselness
+2024-11-21 16:52:08,815 - vessel_segmentation.core.hessian_processor - INFO - Computing Hessian at scale 0.4166666666666667
+2024-11-21 17:11:00,967 - vessel_segmentation.processing.vessel_particles - INFO - Found 1 scales in particle data
+2024-11-21 17:11:01,370 - vessel_segmentation.processing.vessel_particles - INFO - Found 0 vessel points above threshold
+2024-11-21 17:11:05,152 - vessel_segmentation.processing.vessel_particles - INFO - Successfully extracted vessel particles
+2024-11-21 17:11:05,197 - vessel_segmentation.processing.vessel_particles - INFO - Saved particle system to: vessel_segmentation_output/cases/PA005_ct/vesselness/PA005_ct_vessel_particles.vtp
+2024-11-21 17:11:08,663 - main - INFO - Pipeline completed successfully

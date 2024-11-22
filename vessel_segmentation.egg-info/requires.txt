@@ -1,0 +1,9 @@
+numpy
+scipy
+nibabel
+networkx
+scikit-image
+matplotlib
+vtk
+pyyaml
+seaborn

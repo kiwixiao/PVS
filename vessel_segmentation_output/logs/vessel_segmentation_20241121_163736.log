@@ -1,0 +1,58 @@
+2024-11-21 16:37:36,985 - main - INFO - Starting vessel segmentation for case: PA005_ct
+2024-11-21 16:37:36,986 - vessel_segmentation.utils.config_loader - ERROR - Error loading configuration: while parsing a block mapping
+  in "config.yaml", line 27, column 5
+expected <block end>, but found ','
+  in "config.yaml", line 27, column 23
+2024-11-21 16:37:36,986 - main - ERROR - Error during processing: while parsing a block mapping
+  in "config.yaml", line 27, column 5
+expected <block end>, but found ','
+  in "config.yaml", line 27, column 23
+Traceback (most recent call last):
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/main.py", line 89, in main
+    config = config_loader.load_config(args.config)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/utils/config_loader.py", line 68, in load_config
+    config = yaml.safe_load(f)
+             ^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/__init__.py", line 125, in safe_load
+    return load(stream, SafeLoader)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/__init__.py", line 81, in load
+    return loader.get_single_data()
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/constructor.py", line 49, in get_single_data
+    node = self.get_single_node()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 36, in get_single_node
+    document = self.compose_document()
+               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 55, in compose_document
+    node = self.compose_node(None, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/composer.py", line 127, in compose_mapping_node
+    while not self.check_event(MappingEndEvent):
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/parser.py", line 98, in check_event
+    self.current_event = self.state()
+                         ^^^^^^^^^^^^
+  File "/Users/xiaz9n/anaconda3/lib/python3.12/site-packages/yaml/parser.py", line 438, in parse_block_mapping_key
+    raise ParserError("while parsing a block mapping", self.marks[-1],
+yaml.parser.ParserError: while parsing a block mapping
+  in "config.yaml", line 27, column 5
+expected <block end>, but found ','
+  in "config.yaml", line 27, column 23

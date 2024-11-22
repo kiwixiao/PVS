@@ -1,0 +1,32 @@
+2024-11-20 20:56:30,276 - main - INFO - Starting vessel segmentation for case: PA005_ct
+2024-11-20 20:56:30,280 - main - INFO - Running standard pipeline
+2024-11-20 20:56:30,280 - vessel_seg_PA005_ct - INFO - Initializing segmenter with config: {'scale_range': {'min_vessel_size': 0.5, 'max_vessel_size': 14.0, 'num_scales': 1}, 'frangi_filter': {'alpha': 0.5, 'beta': 0.5, 'c': 500}, 'scale_integration': {'method': 'max', 'weights': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]}}
+2024-11-20 20:56:30,280 - vessel_segmentation.processing.segmentation - INFO - VesselSegmenter received config: {'scale_range': {'min_vessel_size': 0.5, 'max_vessel_size': 14.0, 'num_scales': 1}, 'frangi_filter': {'alpha': 0.5, 'beta': 0.5, 'c': 500}, 'scale_integration': {'method': 'max', 'weights': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]}}
+2024-11-20 20:56:30,281 - vessel_segmentation.processing.segmentation - INFO - Initialized VesselSegmenter with parameters: min_size=0.5, max_size=14.0, num_scales=1
+2024-11-20 20:56:30,281 - vessel_seg_PA005_ct - INFO - Starting vessel segmentation for case PA005_ct
+2024-11-20 20:56:30,281 - vessel_seg_PA005_ct - INFO - Using existing preprocessed data
+2024-11-20 20:56:31,411 - vessel_seg_PA005_ct - INFO - Loaded preprocessed data: shape=(552, 552, 430), voxel_size=0.6mm
+2024-11-20 20:56:31,411 - vessel_seg_PA005_ct - INFO - Computing vesselness
+2024-11-20 20:57:21,957 - vessel_segmentation.core.hessian_processor - INFO - Computing Hessian at scale 0.4166666666666667
+2024-11-20 21:20:18,103 - vessel_segmentation.processing.vessel_particles - INFO - Found 1 scales in particle data
+2024-11-20 21:20:18,504 - vessel_segmentation.processing.vessel_particles - INFO - Found 0 vessel points above threshold
+2024-11-20 21:20:22,100 - vessel_segmentation.processing.vessel_particles - INFO - Successfully extracted vessel particles
+2024-11-20 21:20:22,128 - vessel_segmentation.processing.vessel_particles - INFO - Saved particle system to: vessel_segmentation_output/cases/PA005_ct/vesselness/PA005_ct_vessel_particles.vtp
+2024-11-20 21:20:26,234 - vessel_seg_PA005_ct - INFO - Extracting vessel tree
+2024-11-20 21:20:27,474 - vessel_seg_PA005_ct - INFO - Loaded preprocessed data: shape=(552, 552, 430), voxel_size=0.6mm
+2024-11-20 21:20:27,490 - vessel_segmentation.core.vessel_extractor - INFO - Starting vessel mask extration
+2024-11-20 21:20:27,490 - vessel_segmentation.core.vessel_extractor - INFO - Vesselness shape: (552, 552, 430)
+2024-11-20 21:20:27,490 - vessel_segmentation.core.vessel_extractor - INFO - Lung mask shape: (552, 552, 430)
+2024-11-20 21:20:30,723 - vessel_segmentation.core.vessel_extractor - ERROR - Error extracting vessels: 'Logger' object has no attribute 'inf'
+2024-11-20 21:20:30,723 - vessel_seg_PA005_ct - ERROR - Pipeline failed: 'Logger' object has no attribute 'inf'
+2024-11-20 21:20:30,724 - main - ERROR - Error during processing: 'Logger' object has no attribute 'inf'
+Traceback (most recent call last):
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/main.py", line 136, in main
+    results = pipeline.run()
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/pipeline.py", line 177, in run
+    vessel_mask = self.vessel_extractor.extract_vessels(
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/core/vessel_extractor.py", line 31, in extract_vessels
+    self._save_debug_nifti(vesselness, 'vesselness_input')
+  File "/Users/xiaz9n/Dropbox/CCHMCProjects/PVD_VesselProject/VesselSeg/vessel_segmentation_project/vessel_segmentation/core/vessel_extractor.py", line 89, in _save_debug_nifti
+    self.logger.inf(f"Saved debug output: {output_path}")
+AttributeError: 'Logger' object has no attribute 'inf'

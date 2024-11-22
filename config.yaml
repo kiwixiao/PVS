@@ -1,0 +1,81 @@
+# Vessel Segmentation Configuration
+
+processing:
+  force_recompute: false    # Force recompute vessel segmentation
+  enable_caching: false     # Enable Hessian caching (uses more disk space)
+  
+preprocessing:
+  target_spacing: [0.6, 0.6, 0.6]  # mm, isotropic voxel size
+  hu_window:
+    min: -850
+    max: -150
+  edge_enhancement:
+    sigma: 0.5        # Gaussian smoothing parameter
+    enhancement: 1.5  # Enhancement factor for unsharp masking
+  border_exclusion:
+    distance_threshold: 3.0 # mm from border
+    smoothing_sigma: 1.0
+  force_preprocess: false  # Force rerun preprocessing even if files exist
+
+vessel_detection:
+  scale_range:
+    min_vessel_size: 0.5  # mm, minimum vessel diameter
+    max_vessel_size: 14.0 # mm, maximum vessel diameter
+    num_scales: 1        # number of scales to analyze, pick a number between 10 and 20, 10 for now to save time
+  
+  hessian:
+    method: 'standard' # standard or scale_time
+    user_interpolation: True
+
+  frangi_filter:
+    alpha: 0.5  # plate-like vs line-like structure differentiation
+    beta: 0.5   # blob-like vs line-like structure differentiation
+    c: 500      # noise sensitivity parameter
+
+  scale_integration:
+    method: "max"  # Options: "max", "weighted", "adaptive"
+    # If method is "weighted":
+    weights: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+
+vessel_refinement:
+  vessel_connectivity:
+    gap_size_threshold: 6     # voxels, maximum gap to bridge
+    angle_threshold: 60       # degrees, maximum angle for connection
+    radius_ratio_max: 2.0     # maximum radius ratio between segments
+    min_overlap_length: 2     # voxels, minimum overlap for connection
+
+  small_segment_filtering:
+    min_length: 5            # voxels, minimum segment length
+    min_radius: 0.3          # mm, minimum vessel radius
+    isolated_segment_threshold: 10  # voxels, threshold for isolated segments
+
+  tree_structure:
+    generation_radius_ratio: 0.8  # ratio threshold for new generation
+    branch_angle_min: 20          # degrees, minimum branching angle
+    branch_angle_max: 160         # degrees, maximum branching angle
+
+surface_generation:
+  smoothing:
+    iterations: 20           # number of smoothing iterations
+    relaxation_factor: 0.1   # smoothing relaxation parameter
+    feature_angle: 60        # degrees, preserve features above this angle
+    edge_angle: 15          # degrees, preserve edges above this angle
+
+  decimation:
+    target_reduction: 0.5    # reduce vertices by this factor
+    preserve_topology: true
+    max_error: 0.1          # maximum error in mm
+
+  quality_metrics:
+    min_triangle_quality: 0.3  # minimum triangle quality (0-1)
+    max_dihedral_angle: 160   # maximum dihedral angle in degrees
+
+visualization:
+  colormaps:
+    vesselness: "jet"
+    radius: "viridis"
+    generation: "plasma"
+  
+  opacity:
+    surface: 0.8
+    centerlines: 1.0
