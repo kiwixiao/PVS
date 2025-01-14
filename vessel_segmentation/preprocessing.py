@@ -4,6 +4,47 @@ import SimpleITK as sitk
 from scipy.ndimage import binary_erosion, distance_transform_edt
 import os
 
+def resample_to_isotropic(image: sitk.Image, target_spacing: float = 0.6) -> sitk.Image:
+    """Resample image to isotropic resolution.
+    
+    Args:
+        image: Input SimpleITK image
+        target_spacing: Target isotropic spacing in mm (default: 0.6mm)
+        
+    Returns:
+        Resampled image with isotropic spacing
+    """
+    # Get original spacing and size
+    original_spacing = image.GetSpacing()
+    original_size = image.GetSize()
+    
+    # Calculate new size
+    new_spacing = [target_spacing] * 3
+    new_size = [
+        int(round(osz * ospc / target_spacing))
+        for osz, ospc in zip(original_size, original_spacing)
+    ]
+    
+    # Create resampling filter
+    resample = sitk.ResampleImageFilter()
+    resample.SetOutputSpacing(new_spacing)
+    resample.SetSize(new_size)
+    resample.SetOutputDirection(image.GetDirection())
+    resample.SetOutputOrigin(image.GetOrigin())
+    resample.SetTransform(sitk.Transform())
+    resample.SetDefaultPixelValue(image.GetPixelIDValue())
+    
+    # Set interpolator based on image type
+    if image.GetPixelID() in [sitk.sitkUInt8, sitk.sitkInt8]:
+        resample.SetInterpolator(sitk.sitkNearestNeighbor)
+    else:
+        resample.SetInterpolator(sitk.sitkBSpline)
+    
+    # Perform resampling
+    resampled_image = resample.Execute(image)
+    
+    return resampled_image
+
 def segment_lungs(input_image):
     """Segment lungs using lungmask"""
     import lungmask

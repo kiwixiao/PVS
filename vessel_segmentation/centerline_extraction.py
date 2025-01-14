@@ -1,299 +1,362 @@
 import numpy as np
+from typing import Tuple, List, Set
+from tqdm import tqdm
 import SimpleITK as sitk
 import os
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import List, Tuple, Dict, Set
+import vtk
+from vtk.util import numpy_support
 import gc
 
-@dataclass
-class CenterlinePoint:
-    """Data structure for centerline points"""
-    x: int
-    y: int
-    z: int
-    type: int  # 0=isolated, 1=endpoint, 2=segment, 3=bifurcation
-    direction: np.ndarray  # Primary direction vector
-    vessel_radius: float  # From σmax
-    neighbors: Set[Tuple[int, int, int]]  # Connected points
-    group_id: int  # For connected components
-
-@dataclass
-class VesselSegment:
-    """Data structure for vessel segments"""
-    points: List[CenterlinePoint]
-    mean_direction: np.ndarray
-    mean_radius: float
-    start_point: CenterlinePoint
-    end_point: CenterlinePoint
-
-def extract_centerlines(binary_vessels, sigma_max=None):
-    """Extract vessel centerlines using Palagyi's 6-subiteration thinning
+def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
+    """
+    Implementation of Palagyi & Kuba's 6-subiteration thinning algorithm.
     
     Args:
-        binary_vessels: Binary vessel mask
-        sigma_max: Scale of maximum vesselness response (for vessel radius)
+        binary_volume: 3D numpy array with binary vessel segmentation (1=vessel, 0=background)
         
     Returns:
-        centerlines: Binary centerline mask
-        point_types: Point classification (0=isolated, 1=endpoint, 2=segment, 3=bifurcation)
+        3D numpy array with centerline voxels
     """
-    # Initialize arrays
-    centerlines = binary_vessels.copy()
-    point_types = np.zeros_like(binary_vessels, dtype=np.int8)
+    # Print initial statistics
+    print("\nInitial vessel mask statistics:")
+    print(f"Total vessel voxels: {np.sum(binary_volume)}")
     
-    # Create lookup tables for topology preservation
-    euler_lut = create_euler_lut()
-    simple_point_lut = create_simple_point_lut()
+    # Pad volume to handle border cases
+    padded = np.pad(binary_volume, pad_width=1, mode='constant', constant_values=0)
     
-    # Main thinning loop
-    changed = True
-    while changed:
-        changed = False
-        # Six subiteration directions
-        for direction in ['up', 'down', 'north', 'south', 'east', 'west']:
-            # Identify simple points in current direction
-            simple_points = identify_simple_points(centerlines, direction, simple_point_lut, euler_lut)
+    # Continue until no points can be deleted
+    iteration = 0
+    with tqdm(desc="Thinning iterations", leave=False) as pbar:
+        while True:
+            changed = False
+            # Apply 6 subiterations in order (U,D,N,S,E,W)
+            for direction in range(6):
+                deletable_points = []
+                
+                # Get border points for efficiency
+                border_points = np.argwhere((padded == 1) & 
+                    np.any([np.roll(padded == 0, shift, axis=ax) 
+                           for ax, shift in [(0,1), (0,-1), (1,1), (1,-1), (2,1), (2,-1)]], axis=0))
+                
+                # Process points in batches for memory efficiency
+                batch_size = 1000
+                for i in range(0, len(border_points), batch_size):
+                    batch = border_points[i:i+batch_size]
+                    
+                    for x, y, z in batch:
+                        # Skip border due to padding
+                        if (x < 1 or y < 1 or z < 1 or 
+                            x >= padded.shape[0]-1 or 
+                            y >= padded.shape[1]-1 or 
+                            z >= padded.shape[2]-1):
+                            continue
+                        
+                        # Get 3x3x3 neighborhood
+                        nb = padded[x-1:x+2, y-1:y+2, z-1:z+2]
+                        
+                        # Check if point matches template for this direction
+                        if matches_deletion_template(nb, direction):
+                            # Check if point is simple
+                            if is_simple_point(nb):
+                                deletable_points.append((x,y,z))
+                    
+                    # Periodic garbage collection
+                    if i % 5000 == 0:
+                        gc.collect()
+                
+                # Delete points simultaneously
+                if len(deletable_points) > 0:
+                    changed = True
+                    for x,y,z in deletable_points:
+                        padded[x,y,z] = 0
             
-            # Remove simple points simultaneously
-            if np.any(simple_points):
-                centerlines[simple_points] = 0
-                changed = True
+            if not changed:
+                break
+                
+            iteration += 1
+            pbar.update(1)
             
-            gc.collect()
+            # Periodic cleanup
+            if iteration % 5 == 0:
+                gc.collect()
     
-    # Classify centerline points
-    points = classify_centerline_points(centerlines, sigma_max)
+    # Remove padding and return
+    centerlines = padded[1:-1, 1:-1, 1:-1]
     
-    # Create vessel segments
-    segments = create_vessel_segments(points)
+    # Print comparison statistics
+    print("\nComparison statistics:")
+    print(f"Original vessel voxels: {np.sum(binary_volume)}")
+    print(f"Centerline voxels: {np.sum(centerlines)}")
+    print(f"Reduction ratio: {np.sum(centerlines) / np.sum(binary_volume):.4f}")
     
-    # Clean centerlines
-    centerlines, point_types = clean_centerlines(points, segments)
+    return centerlines
+
+def matches_deletion_template(nb: np.ndarray, direction: int) -> bool:
+    """
+    Check if 3x3x3 neighborhood matches deletion template for given direction.
+    Templates M1-M6 from Figure 3 and their rotations.
+    """
+    # Get base templates for this direction
+    if direction == 0:  # U direction
+        # Template M1
+        if (nb[1,1,2] == 0 and  # point marked U must be 0
+            np.sum(nb[1,:,1]) >= 1 and  # at least one x point must be 1
+            nb[1,1,0] == 1):  # center bottom must be 1
+            return True
+            
+        # Template M2  
+        if (nb[1,1,2] == 0 and
+            nb[1,0,1] == 1 and
+            nb[1,2,1] == 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M3
+        if (nb[1,1,2] == 0 and
+            nb[0,1,1] == 1 and
+            nb[2,1,1] == 1 and 
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M4 
+        if (nb[1,1,2] == 0 and
+            nb[0,0,1] == 1 and
+            nb[2,2,1] == 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M5
+        if (nb[1,1,2] == 0 and
+            np.sum(nb[1,:,1]) >= 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M6
+        if (nb[1,1,2] == 0 and
+            nb[1,0,1] == 1 and
+            nb[1,2,1] == 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+    # Other directions - rotate/reflect templates appropriately
+    else:
+        nb = rotate_neighborhood(nb, direction)
+        return matches_deletion_template(nb, 0)
+        
+    return False
+
+def is_simple_point(nb: np.ndarray) -> bool:
+    """
+    Check if point is simple according to topology preservation criteria.
+    """
+    # Get counts of 26-connected and 6-connected components
+    n26 = count_26_components(nb)
+    n6 = count_6_components(nb)
+    
+    # Point is simple if:
+    # 1. Single 26-connected component in N26 intersection B
+    # 2. Single 6-connected component in N26 intersection background
+    return n26 == 1 and n6 == 1
+
+def count_26_components(nb: np.ndarray) -> int:
+    """Count number of 26-connected components in 3x3x3 neighborhood"""
+    markers = np.zeros_like(nb)
+    current_label = 1
+    
+    # Iterate through points
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                if nb[x,y,z] == 1 and markers[x,y,z] == 0:
+                    # Found new component, flood fill
+                    flood_fill_26(nb, markers, x, y, z, current_label)
+                    current_label += 1
+                    
+    return current_label - 1
+
+def count_6_components(nb: np.ndarray) -> int:
+    """Count number of 6-connected components in 3x3x3 neighborhood"""
+    markers = np.zeros_like(nb)
+    current_label = 1
+    
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                if nb[x,y,z] == 1 and markers[x,y,z] == 0:
+                    flood_fill_6(nb, markers, x, y, z, current_label)
+                    current_label += 1
+                    
+    return current_label - 1
+
+def flood_fill_26(nb: np.ndarray, markers: np.ndarray, x: int, y: int, z: int, label: int):
+    """26-connected flood fill"""
+    if x < 0 or x > 2 or y < 0 or y > 2 or z < 0 or z > 2:
+        return
+    if nb[x,y,z] == 0 or markers[x,y,z] != 0:
+        return
+        
+    markers[x,y,z] = label
+    
+    # Recursively fill 26-connected neighbors
+    for dx in [-1,0,1]:
+        for dy in [-1,0,1]:
+            for dz in [-1,0,1]:
+                if dx == dy == dz == 0:
+                    continue
+                flood_fill_26(nb, markers, x+dx, y+dy, z+dz, label)
+
+def flood_fill_6(nb: np.ndarray, markers: np.ndarray, x: int, y: int, z: int, label: int):
+    """6-connected flood fill"""
+    if x < 0 or x > 2 or y < 0 or y > 2 or z < 0 or z > 2:
+        return
+    if nb[x,y,z] == 0 or markers[x,y,z] != 0:
+        return
+        
+    markers[x,y,z] = label
+    
+    # Recursively fill 6-connected neighbors
+    for d in [(0,0,1), (0,0,-1), (0,1,0), (0,-1,0), (1,0,0), (-1,0,0)]:
+        flood_fill_6(nb, markers, x+d[0], y+d[1], z+d[2], label)
+
+def rotate_neighborhood(nb: np.ndarray, direction: int) -> np.ndarray:
+    """Rotate/reflect 3x3x3 neighborhood based on direction"""
+    if direction == 1:  # D - rotate 180 around Y
+        return np.rot90(nb, k=2, axes=(0,2))
+    elif direction == 2:  # N - rotate 90 around X 
+        return np.rot90(nb, k=1, axes=(1,2))
+    elif direction == 3:  # S - rotate -90 around X
+        return np.rot90(nb, k=-1, axes=(1,2))
+    elif direction == 4:  # E - rotate 90 around Y
+        return np.rot90(nb, k=1, axes=(0,2))
+    elif direction == 5:  # W - rotate -90 around Y
+        return np.rot90(nb, k=-1, axes=(0,2))
+    return nb
+
+def extract_centerlines(binary_vessels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract centerlines from binary vessel mask using Palagyi's 6-subiteration thinning."""
+    # Get centerlines using thinning
+    centerlines = thin_vessels_3d(binary_vessels)
+    
+    # Classify points
+    point_types = np.zeros_like(centerlines, dtype=np.uint8)
+    points = np.where(centerlines > 0)
+    
+    # Validate one-pixel-width property
+    max_neighbors = 0
+    for i in range(len(points[0])):
+        z, y, x = points[0][i], points[1][i], points[2][i]
+        
+        # Get neighborhood
+        neighborhood = np.zeros((3,3,3), dtype=centerlines.dtype)
+        zmin, zmax = max(0, z-1), min(centerlines.shape[0], z+2)
+        ymin, ymax = max(0, y-1), min(centerlines.shape[1], y+2)
+        xmin, xmax = max(0, x-1), min(centerlines.shape[2], x+2)
+        
+        z_slice = slice(max(0, 1-(z-zmin)), min(3, 1+(zmax-z)))
+        y_slice = slice(max(0, 1-(y-ymin)), min(3, 1+(ymax-y)))
+        x_slice = slice(max(0, 1-(x-xmin)), min(3, 1+(xmax-x)))
+        
+        neighborhood[z_slice, y_slice, x_slice] = centerlines[zmin:zmax, ymin:ymax, xmin:xmax]
+        
+        # Count neighbors
+        neighbors = np.sum(neighborhood) - 1  # Subtract center point
+        max_neighbors = max(max_neighbors, neighbors)
+        
+        if neighbors == 1:
+            point_types[z,y,x] = 1  # Endpoint
+        elif neighbors == 2:
+            point_types[z,y,x] = 2  # Segment point
+        elif neighbors > 2:
+            point_types[z,y,x] = 3  # Bifurcation point
+    
+    print(f"\nOne-pixel-width validation:")
+    print(f"Maximum number of neighbors for any centerline point: {max_neighbors}")
+    if max_neighbors > 3:
+        print("Warning: Some points have more than 3 neighbors, indicating possible thickness issues")
+    
+    # Print centerline statistics
+    total_points = np.sum(centerlines)
+    endpoint_count = np.sum(point_types == 1)
+    segment_count = np.sum(point_types == 2)
+    bifurcation_count = np.sum(point_types == 3)
+    
+    print("\nCenterline Statistics:")
+    print(f"Total centerline points: {total_points}")
+    print(f"Endpoints: {endpoint_count}")
+    print(f"Segment points: {segment_count}")
+    print(f"Bifurcation points: {bifurcation_count}")
+    print(f"Average branch length: {segment_count / (endpoint_count + bifurcation_count):.2f} points")
     
     return centerlines, point_types
 
-def create_euler_lut():
-    """Create lookup table for Euler characteristic"""
-    # Implementation of lookup table for 26-connectivity
-    # This is a simplified version - full implementation would have 256 entries
-    lut = np.zeros(256, dtype=np.int8)
-    # Fill lookup table based on topology preservation rules
-    # ... (detailed implementation omitted for brevity)
-    return lut
-
-def create_simple_point_lut():
-    """Create lookup table for simple point detection"""
-    # Implementation of lookup table for simple point criteria
-    # This is a simplified version - full implementation would have 256 entries
-    lut = np.zeros(256, dtype=bool)
-    # Fill lookup table based on simple point criteria
-    # ... (detailed implementation omitted for brevity)
-    return lut
-
-def identify_simple_points(image, direction, simple_point_lut, euler_lut):
-    """Identify simple points in the given direction"""
-    # Get 3x3x3 neighborhood configuration
-    from scipy.ndimage import binary_erosion, binary_dilation
+def save_centerline_results(centerlines, point_types, output_dir):
+    """Save centerline extraction results in both NRRD and VTK formats"""
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Create structuring element for current direction
-    strel = np.ones((3,3,3), dtype=bool)
-    if direction == 'up':
-        strel[2,:,:] = False
-    elif direction == 'down':
-        strel[0,:,:] = False
-    elif direction == 'north':
-        strel[:,2,:] = False
-    elif direction == 'south':
-        strel[:,0,:] = False
-    elif direction == 'east':
-        strel[:,:,2] = False
-    elif direction == 'west':
-        strel[:,:,0] = False
+    # Save NRRD files
+    sitk.WriteImage(
+        sitk.GetImageFromArray(centerlines.astype(np.uint8)),
+        os.path.join(output_dir, 'centerlines.nrrd')
+    )
+    sitk.WriteImage(
+        sitk.GetImageFromArray(point_types),
+        os.path.join(output_dir, 'centerline_point_types.nrrd')
+    )
     
-    # Find border points in current direction
-    border = binary_erosion(image, strel) ^ image
+    # Convert to VTK PolyData
+    points = vtk.vtkPoints()
+    lines = vtk.vtkCellArray()
+    point_data = vtk.vtkIntArray()
+    point_data.SetName("PointType")
     
-    # Check topology preservation for each point
-    simple_points = np.zeros_like(image, dtype=bool)
-    points = np.where(border)
+    # Get centerline points
+    z, y, x = np.where(centerlines > 0)
+    point_id = 0
+    point_id_map = {}
     
-    for z,y,x in zip(*points):
-        # Get 3x3x3 neighborhood
-        neighborhood = image[z-1:z+2, y-1:y+2, x-1:x+2].copy()
-        neighborhood[1,1,1] = 0  # Remove center point
-        
-        # Check if point is simple using lookup tables
-        if check_topology(neighborhood, simple_point_lut, euler_lut):
-            simple_points[z,y,x] = True
+    # Add points and their types
+    for i in range(len(z)):
+        points.InsertNextPoint(x[i], y[i], z[i])
+        point_data.InsertNextValue(point_types[z[i], y[i], x[i]])
+        point_id_map[(z[i], y[i], x[i])] = point_id
+        point_id += 1
     
-    return simple_points
-
-def check_topology(neighborhood, simple_point_lut, euler_lut):
-    """Check topology preservation using lookup tables"""
-    # Convert neighborhood to index
-    index = 0
-    for i, value in enumerate(neighborhood.ravel()):
-        if value:
-            index |= (1 << i)
-    
-    # Check if point is simple
-    return simple_point_lut[index]
-
-def classify_centerline_points(centerlines, sigma_max=None):
-    """Classify centerline points and create data structures"""
-    points = {}
-    group_id = 0
-    
-    # Find all centerline points
-    for z,y,x in zip(*np.where(centerlines)):
-        # Count 26-neighbors
-        neighbors = set()
+    # Create lines by connecting adjacent points
+    for i in range(len(z)):
+        current = (z[i], y[i], x[i])
+        # Check 26-neighborhood for connected points
         for dz in [-1,0,1]:
             for dy in [-1,0,1]:
                 for dx in [-1,0,1]:
                     if dz == 0 and dy == 0 and dx == 0:
                         continue
-                    if centerlines[z+dz,y+dy,x+dx]:
-                        neighbors.add((z+dz,y+dy,x+dx))
-        
-        # Create point object
-        radius = sigma_max[z,y,x] if sigma_max is not None else 1.0
-        point = CenterlinePoint(
-            x=x, y=y, z=z,
-            type=len(neighbors),  # Will be updated later
-            direction=np.zeros(3),  # Will be updated for segment points
-            vessel_radius=radius,
-            neighbors=neighbors,
-            group_id=-1
-        )
-        points[(z,y,x)] = point
+                    nz, ny, nx = z[i] + dz, y[i] + dy, x[i] + dx
+                    if (nz, ny, nx) in point_id_map and \
+                       point_types[nz, ny, nx] > 0:  # Connected point
+                        # Create line only if current point ID is less than neighbor ID
+                        # to avoid duplicate lines
+                        if point_id_map[current] < point_id_map[(nz, ny, nx)]:
+                            line = vtk.vtkLine()
+                            line.GetPointIds().SetId(0, point_id_map[current])
+                            line.GetPointIds().SetId(1, point_id_map[(nz, ny, nx)])
+                            lines.InsertNextCell(line)
     
-    # Classify points
-    for point in points.values():
-        n = len(point.neighbors)
-        if n == 0:
-            point.type = 0  # Isolated
-        elif n == 1:
-            point.type = 1  # Endpoint
-        elif n == 2:
-            point.type = 2  # Segment
-            # Calculate direction vector for segment points
-            n1, n2 = list(point.neighbors)
-            vec = np.array([n2[0]-n1[0], n2[1]-n1[1], n2[2]-n1[2]])
-            point.direction = vec / np.linalg.norm(vec)
-        else:
-            point.type = 3  # Bifurcation
+    # Create PolyData
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(points)
+    polydata.SetLines(lines)
+    polydata.GetPointData().AddArray(point_data)
     
-    return points
-
-def create_vessel_segments(points):
-    """Create vessel segments from classified points"""
-    segments = []
-    visited = set()
+    # Save as VTK file
+    writer = vtk.vtkPolyDataWriter()
+    writer.SetFileName(os.path.join(output_dir, 'centerlines.vtk'))
+    writer.SetInputData(polydata)
+    writer.Write()
     
-    # Find segment start points (endpoints or bifurcations)
-    start_points = [p for p in points.values() if p.type in [1,3]]
-    
-    for start in start_points:
-        if (start.z,start.y,start.x) in visited:
-            continue
-            
-        # Follow segment
-        if start.type == 2:
-            continue  # Skip if not endpoint/bifurcation
-            
-        for neighbor in start.neighbors:
-            if neighbor in visited:
-                continue
-                
-            # Start new segment
-            segment_points = [start]
-            current = points[neighbor]
-            visited.add((start.z,start.y,start.x))
-            
-            # Follow until next endpoint/bifurcation
-            while current.type == 2 and (current.z,current.y,current.x) not in visited:
-                segment_points.append(current)
-                visited.add((current.z,current.y,current.x))
-                # Get next unvisited neighbor
-                next_point = None
-                for n in current.neighbors:
-                    if n not in visited:
-                        next_point = points[n]
-                        break
-                if next_point is None:
-                    break
-                current = next_point
-            
-            # Add final point if endpoint/bifurcation
-            if current.type in [1,3]:
-                segment_points.append(current)
-                visited.add((current.z,current.y,current.x))
-            
-            # Create segment if valid
-            if len(segment_points) > 1:
-                # Calculate mean direction and radius
-                directions = [p.direction for p in segment_points if p.type == 2]
-                mean_dir = np.mean(directions, axis=0)
-                mean_dir = mean_dir / np.linalg.norm(mean_dir)
-                
-                mean_radius = np.mean([p.vessel_radius for p in segment_points])
-                
-                segment = VesselSegment(
-                    points=segment_points,
-                    mean_direction=mean_dir,
-                    mean_radius=mean_radius,
-                    start_point=segment_points[0],
-                    end_point=segment_points[-1]
-                )
-                segments.append(segment)
-    
-    return segments
-
-def clean_centerlines(points, segments):
-    """Clean centerlines by removing unwanted points"""
-    # Initialize output arrays
-    shape = max(p.z for p in points.values()) + 1, \
-            max(p.y for p in points.values()) + 1, \
-            max(p.x for p in points.values()) + 1
-    centerlines = np.zeros(shape, dtype=np.uint8)
-    point_types = np.zeros(shape, dtype=np.int8)
-    
-    # Remove isolated points and short endpoints
-    for point in points.values():
-        if point.type == 0:  # Remove isolated points
-            continue
-        if point.type == 1:  # Check endpoints
-            # Remove if connected directly to bifurcation
-            neighbor = list(point.neighbors)[0]
-            if points[neighbor].type == 3:
-                continue
-        
-        # Keep point
-        centerlines[point.z,point.y,point.x] = 1
-        point_types[point.z,point.y,point.x] = point.type
-    
-    return centerlines, point_types
-
-def save_centerline_results(centerlines, point_types, output_dir):
-    """Save centerline extraction results
-    
-    Args:
-        centerlines: Binary centerline mask
-        point_types: Point classification (0=isolated, 1=endpoint, 2=segment, 3=bifurcation)
-        output_dir: Directory to save results
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save centerlines
-    sitk.WriteImage(
-        sitk.GetImageFromArray(centerlines.astype(np.uint8)),
-        os.path.join(output_dir, 'centerlines.nrrd')
-    )
-    
-    # Save point types
-    sitk.WriteImage(
-        sitk.GetImageFromArray(point_types),
-        os.path.join(output_dir, 'centerline_types.nrrd')
-    )
+    print("\nSaved centerline results:")
+    print(f"- NRRD files: centerlines.nrrd, centerline_point_types.nrrd")
+    print(f"- VTK file: centerlines.vtk")
+    print("\nPoint type legend:")
+    print("1: Endpoint")
+    print("2: Segment point")
+    print("3: Bifurcation point")

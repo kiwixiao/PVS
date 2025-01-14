@@ -1,8 +1,9 @@
 import numpy as np
 import SimpleITK as sitk
 import os
+from tqdm import tqdm
 
-def calculate_adaptive_threshold(vesselness, sigma_max, voxel_size_mm=0.5, Tmin=0.07, Tmax=0.17):
+def calculate_adaptive_threshold(vesselness, sigma_max, voxel_size_mm=0.6, Tmin=0.07, Tmax=0.17):
     """Calculate adaptive threshold based on vessel size
     
     Args:
@@ -16,49 +17,52 @@ def calculate_adaptive_threshold(vesselness, sigma_max, voxel_size_mm=0.5, Tmin=
         binary_vessels: Binary vessel mask
         threshold_map: Map of thresholds used
     """
+    print("Starting adaptive threshold calculation...")
+    
     # Width parameter for scale transition (w = 2 × voxel_size_mm)
     w = 2.0 * voxel_size_mm
+    
+    print(f"Image shape: {vesselness.shape}")
+    print("Counting scales...")
     
     # Count number of scales smaller than w
     n = np.sum(sigma_max < w)
     if n == 0:  # Handle case where all scales are larger than w
         n = 1
     
-    # Initialize threshold map
-    threshold_map = np.zeros_like(sigma_max)
+    print(f"Number of scales smaller than {w:.2f}mm: {n}")
+    print("Calculating threshold values...")
     
-    # Calculate thresholds for each scale index
-    for i in range(n):
-        # Find voxels at this scale index
-        scale_mask = (sigma_max >= (i * w / n)) & (sigma_max < ((i + 1) * w / n))
-        # Apply exponential interpolation formula
-        threshold_map[scale_mask] = Tmin * np.exp(np.log(Tmax/Tmin) * i / n)
+    # Pre-calculate all thresholds at once
+    scale_indices = np.arange(n)
+    thresholds = Tmin * np.exp(np.log(Tmax/Tmin) * scale_indices / n)
+    
+    print("Creating scale index array...")
+    # Create scale index array
+    scale_indices = np.floor(sigma_max / (w/n)).astype(int)
+    scale_indices = np.clip(scale_indices, 0, n-1)
+    
+    print("Applying thresholds...")
+    # Apply thresholds using vectorized indexing
+    threshold_map = thresholds[scale_indices]
     
     # Set maximum threshold for all scales >= w
     threshold_map[sigma_max >= w] = Tmax
     
+    print("Generating binary vessel mask...")
     # Apply thresholds to get binary vessel mask
     binary_vessels = (vesselness >= threshold_map).astype(np.uint8)
     
+    print("Adaptive threshold calculation complete.")
     return binary_vessels, threshold_map
 
 def save_threshold_results(binary_vessels, threshold_map, output_dir):
-    """Save thresholding results
-    
-    Args:
-        binary_vessels: Binary vessel mask
-        threshold_map: Map of thresholds used
-        output_dir: Directory to save results
-    """
+    """Save thresholding results"""
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Save binary vessel mask
     sitk.WriteImage(
         sitk.GetImageFromArray(binary_vessels),
         os.path.join(output_dir, 'binary_vessels.nrrd')
     )
-    
-    # Save threshold map
     sitk.WriteImage(
         sitk.GetImageFromArray(threshold_map),
         os.path.join(output_dir, 'threshold_map.nrrd')

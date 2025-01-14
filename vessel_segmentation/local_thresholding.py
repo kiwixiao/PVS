@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
 import logging
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -35,91 +36,263 @@ class VesselSegmentation:
     quality_metrics: QualityReport
     processing_parameters: ROIParameters
 
-def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_types, sigma_max):
-    """Perform local optimal thresholding around centerlines
+def extract_roi_region(center, radius, image, image_shape):
+    """Extract a local region around a point"""
+    pad = int(np.ceil(radius))
+    min_bounds = np.maximum(np.array(center) - pad, 0)
+    max_bounds = np.minimum(np.array(center) + pad, np.array(image_shape) - 1)
+    
+    return image[min_bounds[0]:max_bounds[0]+1,
+                min_bounds[1]:max_bounds[1]+1,
+                min_bounds[2]:max_bounds[2]+1], (min_bounds, max_bounds)
+
+def group_segments(centerlines, point_types):
+    """Group connected segment points together"""
+    from scipy.ndimage import label
+    
+    # Get segment points
+    segment_mask = (point_types == 2)
+    
+    # Label connected components
+    labeled, num = label(segment_mask)
+    
+    # Extract groups
+    groups = []
+    for i in range(1, num+1):
+        points = np.array(np.where(labeled == i)).T
+        if len(points) > 0:
+            groups.append(points)
+    
+    return groups
+
+def calculate_average_direction(points, vessel_directions):
+    """Calculate average direction vector for a group of points"""
+    directions = []
+    for point in points:
+        z,y,x = point
+        direction = vessel_directions[z,y,x]
+        # Ensure consistent direction (avoid sign flips)
+        if len(directions) > 0:
+            if np.dot(direction, directions[0]) < 0:
+                direction = -direction
+        directions.append(direction)
+    
+    # Average directions
+    avg_direction = np.mean(directions, axis=0)
+    norm = np.linalg.norm(avg_direction)
+    if norm > 0:
+        avg_direction = avg_direction / norm
+    
+    return avg_direction
+
+def create_cylindrical_roi(points, centerline_points, direction, radius):
+    """Create precise cylindrical ROI following vessel direction using vectorized operations
     
     Args:
-        binary_vessels: Initial binary vessel mask
-        vesselness: Vesselness measure
-        centerlines: Centerline points
-        point_types: Point classification (0=isolated, 1=endpoint, 2=segment, 3=bifurcation)
-        sigma_max: Scale of maximum vesselness response
+        points: (N,3) array of points to test
+        centerline_points: (M,3) array of centerline points
+        direction: (3,) normalized direction vector
+        radius: cylinder radius
+        
+    Returns:
+        Boolean mask indicating which points are inside the cylinder
     """
+    # Convert centerline points to array
+    centerline = np.array(centerline_points)
+    
+    # Calculate all segments at once
+    segments = centerline[1:] - centerline[:-1]  # Shape: (M-1, 3)
+    segment_lengths_sq = np.sum(segments**2, axis=1)  # Shape: (M-1,)
+    
+    # Expand points for broadcasting
+    points_expanded = points[:, np.newaxis, :]  # Shape: (N, 1, 3)
+    starts = centerline[:-1]  # Shape: (M-1, 3)
+    
+    # Calculate relative positions for all points and segments at once
+    points_relative = points_expanded - starts  # Shape: (N, M-1, 3)
+    
+    # Vectorized projection calculation
+    # Dot product of relative positions with segments
+    dots = np.sum(points_relative * segments, axis=2)  # Shape: (N, M-1)
+    
+    # Calculate projection parameters
+    t = dots / segment_lengths_sq  # Shape: (N, M-1)
+    
+    # Find valid projections (0 ≤ t ≤ 1)
+    valid_mask = (t >= 0) & (t <= 1)  # Shape: (N, M-1)
+    
+    if not np.any(valid_mask):
+        return np.zeros(len(points), dtype=bool)
+    
+    # Calculate projection points for valid projections
+    t_valid = np.where(valid_mask, t, 0)
+    proj_points = starts + t_valid[..., np.newaxis] * segments  # Shape: (N, M-1, 3)
+    
+    # Calculate distances from points to their projections
+    diff = points_expanded - proj_points  # Shape: (N, M-1, 3)
+    distances = np.sqrt(np.sum(diff * diff, axis=2))  # Shape: (N, M-1)
+    
+    # Set invalid distances to infinity
+    distances = np.where(valid_mask, distances, np.inf)
+    
+    # Find minimum distance for each point
+    min_distances = np.min(distances, axis=1)  # Shape: (N,)
+    
+    # Points are inside if minimum distance is less than radius
+    return min_distances <= radius
+
+def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_types, sigma_max, vessel_directions):
+    """Perform local optimal thresholding around centerlines"""
     # Initialize parameters
     params = ROIParameters()
+    image_shape = vesselness.shape
     
-    # Split long segments and create ROIs
-    segments = split_segments(centerlines, point_types, params.max_segment_length, params.overlap)
-    
-    # Process each segment
+    # Initialize output
     final_vessels = np.zeros_like(binary_vessels)
     local_thresholds = np.zeros_like(vesselness)
     
-    # Process cylindrical ROIs (segments)
+    # Process segment points first
     segment_points = np.where(point_types == 2)
-    for segment in segments:
-        # Calculate ROI parameters
-        radius = params.roi_multiplier * max(sigma_max[segment[0]], params.min_radius_cyl)
-        direction = calculate_segment_direction(segment, centerlines)
-        
-        # Create ROI mask
-        roi_mask = create_cylindrical_roi(segment, radius, direction)
-        
-        # Calculate optimal threshold
-        threshold = optimal_threshold(vesselness[roi_mask])
-        
-        # Apply region growing
-        segment_mask = region_growing(
-            segment,
-            vesselness,
-            threshold,
-            roi_mask,
-            params.min_vesselness
-        )
-        
-        # Update results
-        final_vessels |= segment_mask
-        local_thresholds[roi_mask] = threshold
+    print(f"Processing {len(segment_points[0])} segment points...")
     
-    # Process spherical ROIs (bifurcations and endpoints)
+    # Group connected segment points using vectorized operations
+    from scipy.ndimage import label
+    labeled_segments, num_segments = label(point_types == 2)
+    print(f"Found {num_segments} connected segments")
+    
+    # Process each segment
+    for segment_id in tqdm(range(1, num_segments + 1), desc="Processing segments", leave=True):
+        segment_mask = labeled_segments == segment_id
+        z, y, x = np.where(segment_mask)
+        if len(z) == 0:
+            continue
+            
+        # Convert points to list of tuples for split_segments
+        segment_points = list(zip(z, y, x))
+        
+        # Split long segments into overlapping pieces
+        sub_segments = split_segments(centerlines, segment_points, 
+                                    max_length=params.max_segment_length, 
+                                    overlap=params.overlap)
+        
+        # Process each sub-segment
+        for sub_segment in sub_segments:
+            sub_z, sub_y, sub_x = zip(*sub_segment)
+            centerline_points = np.array(list(zip(sub_z, sub_y, sub_x)))
+            
+            # Calculate ROI parameters for this sub-segment
+            sub_mask = np.zeros_like(binary_vessels, dtype=bool)
+            sub_mask[sub_z, sub_y, sub_x] = True
+            max_sigma = np.max(sigma_max[sub_mask])
+            radius = params.roi_multiplier * max(max_sigma, params.min_radius_cyl)
+            
+            # Get sub-segment bounds with padding
+            pad = int(np.ceil(radius))
+            min_bounds = np.maximum([min(sub_z) - pad, min(sub_y) - pad, min(sub_x) - pad], 0)
+            max_bounds = np.minimum([max(sub_z) + pad, max(sub_y) + pad, max(sub_x) + pad], np.array(image_shape) - 1)
+            
+            # Extract local region
+            local_vesselness = vesselness[min_bounds[0]:max_bounds[0]+1,
+                                        min_bounds[1]:max_bounds[1]+1,
+                                        min_bounds[2]:max_bounds[2]+1]
+            
+            # Create grid of points
+            local_shape = tuple(max_bounds - min_bounds + 1)
+            zz, yy, xx = np.meshgrid(np.arange(local_shape[0]),
+                                    np.arange(local_shape[1]),
+                                    np.arange(local_shape[2]),
+                                    indexing='ij')
+            
+            # Calculate average direction for this sub-segment
+            sub_directions = vessel_directions[sub_z, sub_y, sub_x]
+            # Ensure consistent direction (avoid sign flips)
+            ref_direction = sub_directions[0]
+            for i in range(1, len(sub_directions)):
+                if np.dot(sub_directions[i], ref_direction) < 0:
+                    sub_directions[i] = -sub_directions[i]
+            direction = np.mean(sub_directions, axis=0)
+            direction = direction / np.linalg.norm(direction)
+            
+            # Create precise cylindrical ROI
+            points = np.stack([zz.ravel(), yy.ravel(), xx.ravel()], axis=1)
+            # Adjust centerline points to local coordinates
+            local_centerline = centerline_points - min_bounds.reshape(1, 3)
+            local_mask = create_cylindrical_roi(points, local_centerline, direction, radius)
+            local_mask = local_mask.reshape(local_shape)
+            
+            # Calculate optimal threshold
+            if np.any(local_mask):
+                vesselness_roi = local_vesselness[local_mask]
+                threshold = optimal_threshold(vesselness_roi)
+                
+                # Apply threshold
+                grown_mask = (local_vesselness >= threshold) & local_mask & (local_vesselness >= params.min_vesselness)
+                
+                # Update results
+                final_vessels[min_bounds[0]:max_bounds[0]+1,
+                            min_bounds[1]:max_bounds[1]+1,
+                            min_bounds[2]:max_bounds[2]+1] |= grown_mask
+                local_thresholds[min_bounds[0]:max_bounds[0]+1,
+                               min_bounds[1]:max_bounds[1]+1,
+                               min_bounds[2]:max_bounds[2]+1][grown_mask] = threshold
+    
+    # Process special points (bifurcations and endpoints)
     special_points = np.where((point_types == 1) | (point_types == 3))
-    for z,y,x in zip(*special_points):
+    print(f"Processing {len(special_points[0])} special points...")
+    
+    for i in tqdm(range(len(special_points[0])), desc="Processing special points", leave=True):
+        z, y, x = special_points[0][i], special_points[1][i], special_points[2][i]
+        
+        # Skip endpoints connected to bifurcations
+        if point_types[z,y,x] == 1:
+            # Check 26-neighborhood for bifurcations using array operations
+            z_slice = slice(max(0, z-1), min(z+2, image_shape[0]))
+            y_slice = slice(max(0, y-1), min(y+2, image_shape[1]))
+            x_slice = slice(max(0, x-1), min(x+2, image_shape[2]))
+            if np.any(point_types[z_slice, y_slice, x_slice] == 3):
+                continue
+        
         # Calculate ROI parameters
         radius = params.roi_multiplier * max(sigma_max[z,y,x], params.min_radius_sphere)
         
-        # Create ROI mask
-        roi_mask = create_spherical_roi((z,y,x), radius)
+        # Get ROI bounds with padding
+        pad = int(np.ceil(radius))
+        min_bounds = np.maximum([z-pad, y-pad, x-pad], 0)
+        max_bounds = np.minimum([z+pad, y+pad, x+pad], np.array(image_shape) - 1)
+        
+        # Extract local region
+        local_vesselness = vesselness[min_bounds[0]:max_bounds[0]+1,
+                                    min_bounds[1]:max_bounds[1]+1,
+                                    min_bounds[2]:max_bounds[2]+1]
+        
+        # Create spherical mask using vectorized operations
+        local_shape = tuple(max_bounds - min_bounds + 1)
+        zz, yy, xx = np.meshgrid(np.arange(local_shape[0]),
+                                np.arange(local_shape[1]),
+                                np.arange(local_shape[2]),
+                                indexing='ij')
+        
+        local_center = np.array([z,y,x]) - min_bounds
+        dist = np.sqrt((zz - local_center[0])**2 + 
+                      (yy - local_center[1])**2 + 
+                      (xx - local_center[2])**2)
+        local_mask = dist <= radius
         
         # Calculate optimal threshold
-        threshold = optimal_threshold(vesselness[roi_mask])
-        
-        # Apply region growing
-        point_mask = region_growing(
-            [(z,y,x)],
-            vesselness,
-            threshold,
-            roi_mask,
-            params.min_vesselness
-        )
-        
-        # Update results
-        final_vessels |= point_mask
-        local_thresholds[roi_mask] = threshold
-    
-    # Final processing
-    final_vessels = ensure_connectivity(final_vessels)
-    
-    # Generate quality report
-    quality_report = generate_quality_report(final_vessels, centerlines, sigma_max)
-    
-    # Create final segmentation object
-    segmentation = VesselSegmentation(
-        binary_mask=final_vessels,
-        centerlines=centerlines,
-        vessel_radii=sigma_max,
-        quality_metrics=quality_report,
-        processing_parameters=params
-    )
+        if np.any(local_mask):
+            vesselness_roi = local_vesselness[local_mask]
+            threshold = optimal_threshold(vesselness_roi)
+            
+            # Apply threshold
+            grown_mask = (local_vesselness >= threshold) & local_mask & (local_vesselness >= params.min_vesselness)
+            
+            # Update results
+            final_vessels[min_bounds[0]:max_bounds[0]+1,
+                        min_bounds[1]:max_bounds[1]+1,
+                        min_bounds[2]:max_bounds[2]+1] |= grown_mask
+            local_thresholds[min_bounds[0]:max_bounds[0]+1,
+                           min_bounds[1]:max_bounds[1]+1,
+                           min_bounds[2]:max_bounds[2]+1][grown_mask] = threshold
     
     return final_vessels, local_thresholds
 
@@ -146,65 +319,59 @@ def split_segments(centerlines, point_types, max_length, overlap):
     
     return segments
 
-def calculate_segment_direction(segment, centerlines):
-    """Calculate average direction vector for segment"""
-    if len(segment) < 2:
-        return np.array([0,0,1])
+def region_growing(seeds, vesselness, threshold, roi_mask, min_vesselness):
+    """Perform region growing within ROI"""
+    # Initialize segmentation
+    segmented = np.zeros_like(roi_mask)
     
-    # Calculate direction from first to last point
-    start = np.array(segment[0])
-    end = np.array(segment[-1])
-    direction = end - start
+    # Initialize queue with seed points
+    queue = list(seeds)
+    visited = set()
     
-    # Normalize
-    norm = np.linalg.norm(direction)
-    if norm > 0:
-        direction = direction / norm
+    # Grow region
+    while queue:
+        z,y,x = queue.pop(0)
+        if (z,y,x) in visited:
+            continue
+            
+        visited.add((z,y,x))
+        
+        # Check if point is valid
+        if (0 <= z < roi_mask.shape[0] and 
+            0 <= y < roi_mask.shape[1] and 
+            0 <= x < roi_mask.shape[2] and
+            roi_mask[z,y,x] and
+            vesselness[z,y,x] >= threshold and
+            vesselness[z,y,x] >= min_vesselness):
+            
+            segmented[z,y,x] = True
+            
+            # Add neighbors to queue
+            for dz in [-1,0,1]:
+                for dy in [-1,0,1]:
+                    for dx in [-1,0,1]:
+                        if dz == 0 and dy == 0 and dx == 0:
+                            continue
+                        queue.append((z+dz, y+dy, x+dx))
     
-    return direction
+    return segmented
 
-def create_cylindrical_roi(segment, radius, direction):
-    """Create cylindrical ROI mask"""
-    # Get segment bounds
-    points = np.array(segment)
-    min_bounds = np.min(points, axis=0)
-    max_bounds = np.max(points, axis=0)
+def ensure_connectivity(mask):
+    """Ensure vessel connectivity by removing small components"""
+    from scipy.ndimage import label
     
-    # Create mask
-    shape = tuple(max_bounds - min_bounds + 2*int(np.ceil(radius)))
-    mask = np.zeros(shape, dtype=bool)
+    # Label connected components
+    labeled, num = label(mask)
     
-    # Create cylinder
-    center = (shape[0]//2, shape[1]//2, shape[2]//2)
-    for z in range(shape[0]):
-        for y in range(shape[1]):
-            for x in range(shape[2]):
-                point = np.array([z,y,x]) - center
-                # Project point onto direction vector
-                proj = np.dot(point, direction) * direction
-                # Calculate distance to line
-                dist = np.linalg.norm(point - proj)
-                if dist <= radius:
-                    mask[z,y,x] = True
+    if num == 0:
+        return mask
+        
+    # Find largest component
+    sizes = np.bincount(labeled.ravel())[1:]
+    largest = np.argmax(sizes) + 1
     
-    return mask
-
-def create_spherical_roi(center, radius):
-    """Create spherical ROI mask"""
-    # Create mask
-    shape = tuple(2*int(np.ceil(radius)) + 1 for _ in range(3))
-    mask = np.zeros(shape, dtype=bool)
-    
-    # Create sphere
-    center_point = tuple(s//2 for s in shape)
-    for z in range(shape[0]):
-        for y in range(shape[1]):
-            for x in range(shape[2]):
-                dist = np.sqrt((z-center_point[0])**2 + 
-                             (y-center_point[1])**2 + 
-                             (x-center_point[2])**2)
-                if dist <= radius:
-                    mask[z,y,x] = True
+    # Keep only the largest component
+    mask = labeled == largest
     
     return mask
 
@@ -237,117 +404,35 @@ def optimal_threshold(intensities):
     
     return t
 
-def region_growing(seeds, vesselness, threshold, roi_mask, min_vesselness):
-    """Perform region growing within ROI"""
-    # Initialize segmentation
-    segmented = np.zeros_like(roi_mask)
-    
-    # Initialize queue with seed points
-    queue = list(seeds)
-    
-    # Grow region
-    while queue:
-        z,y,x = queue.pop(0)
-        
-        # Check 26-neighbors
-        for dz in [-1,0,1]:
-            for dy in [-1,0,1]:
-                for dx in [-1,0,1]:
-                    if dz == 0 and dy == 0 and dx == 0:
-                        continue
-                    
-                    nz,ny,nx = z+dz, y+dy, x+dx
-                    
-                    # Check bounds and constraints
-                    if not (0 <= nz < roi_mask.shape[0] and
-                           0 <= ny < roi_mask.shape[1] and
-                           0 <= nx < roi_mask.shape[2]):
-                        continue
-                    
-                    if (not segmented[nz,ny,nx] and
-                        roi_mask[nz,ny,nx] and
-                        vesselness[nz,ny,nx] >= threshold and
-                        vesselness[nz,ny,nx] >= min_vesselness):
-                        
-                        segmented[nz,ny,nx] = True
-                        queue.append((nz,ny,nx))
-    
-    return segmented
-
-def ensure_connectivity(mask):
-    """Ensure vessel connectivity by removing small components"""
-    from scipy.ndimage import label
-    
-    # Label connected components
-    labeled, num = label(mask)
-    
-    # Calculate minimum size
-    min_size = 100  # Adjust based on vessel size
-    
-    # Remove small components
-    for i in range(1, num+1):
-        component = labeled == i
-        if np.sum(component) < min_size:
-            mask[component] = False
-    
-    return mask
-
-def generate_quality_report(mask, centerlines, sigma_max):
-    """Generate quality metrics report"""
-    # Calculate metrics
-    total_volume = np.sum(mask)
-    
-    # Find discontinuities in centerlines
-    continuity_breaks = []  # TODO: Implement discontinuity detection
-    
-    # Check size consistency
-    size_inconsistencies = []  # TODO: Implement size consistency check
-    
-    # Calculate airway overlap
-    airway_overlap = 0.0  # TODO: Implement airway overlap calculation
-    
-    return QualityReport(
-        total_volume=total_volume,
-        continuity_breaks=continuity_breaks,
-        size_inconsistencies=size_inconsistencies,
-        airway_overlap=airway_overlap
-    )
-
-def save_local_threshold_results(segmentation, output_dir):
+def save_local_threshold_results(final_vessels, local_thresholds, output_dir):
     """Save local thresholding results and metadata
     
     Args:
-        segmentation: VesselSegmentation object
+        final_vessels: Binary mask of final vessel segmentation
+        local_thresholds: Array of local threshold values used
         output_dir: Directory to save results
     """
     os.makedirs(output_dir, exist_ok=True)
     
     # Save binary mask
     sitk.WriteImage(
-        sitk.GetImageFromArray(segmentation.binary_mask.astype(np.uint8)),
+        sitk.GetImageFromArray(final_vessels.astype(np.uint8)),
         os.path.join(output_dir, 'final_vessels.nrrd')
     )
     
-    # Save vessel radii
+    # Save local thresholds
     sitk.WriteImage(
-        sitk.GetImageFromArray(segmentation.vessel_radii),
-        os.path.join(output_dir, 'vessel_radii.nrrd')
+        sitk.GetImageFromArray(local_thresholds),
+        os.path.join(output_dir, 'local_thresholds.nrrd')
     )
     
     # Save metadata
-    import json
     metadata = {
         "parameters": {
-            "min_vesselness": segmentation.processing_parameters.min_vesselness,
-            "roi_multiplier": segmentation.processing_parameters.roi_multiplier,
-            "min_radius_cyl": segmentation.processing_parameters.min_radius_cyl,
-            "min_radius_sphere": segmentation.processing_parameters.min_radius_sphere
-        },
-        "quality_metrics": {
-            "total_volume": int(segmentation.quality_metrics.total_volume),
-            "num_continuity_breaks": len(segmentation.quality_metrics.continuity_breaks),
-            "num_size_inconsistencies": len(segmentation.quality_metrics.size_inconsistencies),
-            "airway_overlap": float(segmentation.quality_metrics.airway_overlap)
+            "min_vesselness": 0.05,
+            "roi_multiplier": 1.5,
+            "min_radius_cyl": 3.0,
+            "min_radius_sphere": 4.0
         }
     }
     

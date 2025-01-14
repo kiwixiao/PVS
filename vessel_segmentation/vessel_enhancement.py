@@ -4,19 +4,58 @@ from scipy.ndimage import gaussian_filter
 import os
 import gc
 
-def calculate_vesselness(image_array, mask, scales, output_dir=None):
-    """Calculate vesselness measure using multi-scale Hessian analysis"""
+def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessian=True):
+    """Calculate vesselness measure using multi-scale Hessian analysis
+    
+    Args:
+        image_array: Input image array
+        mask: Binary mask (eroded mask)
+        scales: List of scales for Hessian calculation
+        output_dir: Directory to save intermediate results
+        load_hessian: Whether to load pre-computed results if available
+    """
     # Convert mask to uint8 (this should be the eroded mask)
     mask = mask.astype(np.uint8)
     
-    # Save masked image for debugging (only once)
+    # Save masked image for debugging (only once at the beginning)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        masked_image = image_array * mask
+        masked_image = image_array * (mask > 0)
         sitk.WriteImage(
             sitk.GetImageFromArray(masked_image),
             os.path.join(output_dir, 'masked_image_for_hessian.nrrd')
         )
+    
+    # Check if we can load pre-computed results
+    if output_dir and load_hessian:
+        required_files = [
+            'vesselness.nrrd',
+            'sigma_max.nrrd',
+            'vessel_direction.nrrd'
+        ]
+        
+        try:
+            # Check if all required files exist
+            missing_files = [f for f in required_files 
+                           if not os.path.exists(os.path.join(output_dir, f))]
+            
+            if missing_files:
+                print(f"Missing required files: {missing_files}")
+                print("Computing vesselness from scratch...")
+            else:
+                print("Loading pre-computed vesselness results...")
+                vesselness = sitk.GetArrayFromImage(sitk.ReadImage(
+                    os.path.join(output_dir, 'vesselness.nrrd')))
+                sigma_max = sitk.GetArrayFromImage(sitk.ReadImage(
+                    os.path.join(output_dir, 'sigma_max.nrrd')))
+                vessel_direction = sitk.GetArrayFromImage(sitk.ReadImage(
+                    os.path.join(output_dir, 'vessel_direction.nrrd')))
+                print("Successfully loaded all pre-computed results")
+                return vesselness, sigma_max, vessel_direction
+                
+        except Exception as e:
+            print(f"Error loading pre-computed results: {e}")
+            print("Computing vesselness from scratch...")
     
     # Initialize arrays
     vesselness = np.zeros_like(image_array, dtype=np.float32)
@@ -27,15 +66,31 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
     
     # Calculate vesselness for each scale with progress bar
     for scale in tqdm(scales, desc="Processing scales", leave=False):
-        # Apply Lindeberg normalization (gamma = 1.0)
-        current_vesselness, current_direction = single_scale_vesselness(image_array, mask, scale)
+        # Calculate Hessian
+        hessian = calculate_hessian(image_array, scale)
+        
+        # Calculate eigenvalues and eigenvectors
+        # Note: eigenvalues are sorted by magnitude |λ1| ≤ |λ2| ≤ |λ3|
+        # The vessel direction is the eigenvector corresponding to λ1 (smallest magnitude)
+        eigenvalues, eigenvectors = calculate_eigenvalues(hessian, mask)
+        
+        # Calculate vesselness for this scale
+        current_vesselness = frangi_vesselness(eigenvalues, image_array)
         current_vesselness *= scale  # γ-normalization
+        
+        # Get vessel direction (eigenvector corresponding to smallest eigenvalue λ1)
+        # This eigenvector points along the vessel direction because λ1 corresponds
+        # to the direction of least intensity variation
+        current_direction = eigenvectors[0]  # First eigenvector (corresponding to λ1)
         
         # Update vesselness, sigma_max, and direction only within the mask where response is higher
         update_mask = (current_vesselness > vesselness) & (mask > 0)
         vesselness[update_mask] = current_vesselness[update_mask]
         sigma_max[update_mask] = scale
         vessel_direction[update_mask] = current_direction[update_mask]
+        
+        # Clean up memory
+        gc.collect()
     
     # Normalize vesselness within the mask
     mask_indices = mask > 0
@@ -46,27 +101,48 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
         if max_val > min_val:
             vesselness[mask_indices] = (vesselness_roi - min_val) / (max_val - min_val)
     
+    # Save all results if output directory is provided
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        print("Saving vesselness results...")
+        save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dir)
+    
     return vesselness, sigma_max, vessel_direction
 
-def single_scale_vesselness(image_array, mask, scale):
-    """Calculate vesselness at a single scale"""
-    # Calculate Hessian matrix components
-    print(f"Calculating Hessian for scale {scale:.2f}")
-    hessian = calculate_hessian(image_array, scale)
+def save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dir):
+    """Save vessel enhancement results
     
-    # Calculate eigenvalues and eigenvectors only within eroded mask
-    eigenvalues, eigenvectors = calculate_eigenvalues(hessian, mask)
+    Args:
+        vesselness: Maximum vesselness response (Vmax)
+            - Used for multi-scale thresholding
+            - Used for local optimal thresholding
+        sigma_max: Scale of maximum response (σmax)
+            - Used to determine threshold in multi-scale thresholding
+            - Used for ROI size in local optimal thresholding
+        vessel_direction: Vessel direction vector (e1)
+            - Used for orienting cylindrical ROIs
+            - Used for centerline tracking
+        output_dir: Directory to save results
+    """
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Calculate vesselness measure
-    vesselness = frangi_vesselness(eigenvalues, image_array)
+    # Save maximum vesselness response (Vmax)
+    sitk.WriteImage(
+        sitk.GetImageFromArray(vesselness),
+        os.path.join(output_dir, 'vesselness.nrrd')
+    )
     
-    # Get vessel direction (eigenvector corresponding to smallest eigenvalue)
-    vessel_direction = eigenvectors[0]  # First eigenvector (corresponding to λ1)
+    # Save scale of maximum response (σmax)
+    sitk.WriteImage(
+        sitk.GetImageFromArray(sigma_max),
+        os.path.join(output_dir, 'sigma_max.nrrd')
+    )
     
-    # Apply eroded mask
-    vesselness[mask == 0] = 0
-    
-    return vesselness, vessel_direction
+    # Save vessel direction vectors (e1)
+    sitk.WriteImage(
+        sitk.GetImageFromArray(vessel_direction),
+        os.path.join(output_dir, 'vessel_direction.nrrd')
+    )
 
 def calculate_hessian(image_array, scale):
     """Calculate Hessian matrix components using SimpleITK's recursive Gaussian filter"""
@@ -197,40 +273,3 @@ def frangi_vesselness(eigenvalues, image_array):
     )
     
     return vesselness
-
-def save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dir):
-    """Save vessel enhancement results
-    
-    Args:
-        vesselness: Maximum vesselness response (Vmax)
-        sigma_max: Scale of maximum response (σmax)
-        vessel_direction: Vessel direction vector (e1)
-        output_dir: Directory to save results
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save maximum vesselness response (Vmax)
-    sitk.WriteImage(
-        sitk.GetImageFromArray(vesselness),
-        os.path.join(output_dir, 'vesselness.nrrd')
-    )
-    
-    # Save scale of maximum response (σmax)
-    sitk.WriteImage(
-        sitk.GetImageFromArray(sigma_max),
-        os.path.join(output_dir, 'sigma_max.nrrd')
-    )
-    
-    # Save vessel direction vectors (e1)
-    # Save each component separately for easier visualization
-    for i, component in enumerate(['x', 'y', 'z']):
-        sitk.WriteImage(
-            sitk.GetImageFromArray(vessel_direction[..., i]),
-            os.path.join(output_dir, f'vessel_direction_{component}.nrrd')
-        )
-    
-    # Save combined direction vectors as a single file
-    sitk.WriteImage(
-        sitk.GetImageFromArray(vessel_direction),
-        os.path.join(output_dir, 'vessel_direction.nrrd')
-    )
