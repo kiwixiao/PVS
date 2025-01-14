@@ -2,6 +2,7 @@ import numpy as np
 import SimpleITK as sitk
 from scipy.ndimage import distance_transform_edt
 import os
+import json
 from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
 import logging
