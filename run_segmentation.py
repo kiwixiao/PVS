@@ -8,15 +8,63 @@ from vessel_segmentation.thresholding import calculate_adaptive_threshold, save_
 from vessel_segmentation.centerline_extraction import extract_centerlines, save_centerline_results
 from vessel_segmentation.local_thresholding import local_optimal_thresholding, save_local_threshold_results
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Vessel segmentation pipeline with customizable parameters')
+    parser.add_argument('--input', type=str, default='input/image.nrrd',
+                      help='Input image file')
+    parser.add_argument('--intermediate-dir', type=str, default='intermediate',
+                      help='Directory for intermediate results')
+    parser.add_argument('--output-dir', type=str, default='output',
+                      help='Directory for final results')
+    parser.add_argument('--load-hessian', action='store_true',
+                      help='Load pre-computed Hessian results')
+    parser.add_argument('--skip-to-threshold', action='store_true',
+                      help='Skip to thresholding step')
+    
+    # Parameter selection options
+    param_group = parser.add_argument_group('Parameter Selection')
+    param_group.add_argument('--parameter-set', type=str, default='default',
+                          choices=['default', 'aggressive', 'very_aggressive', 'conservative'],
+                          help='Predefined parameter set for local optimal thresholding')
+    
+    # Individual parameter overrides
+    override_group = parser.add_argument_group('Parameter Overrides')
+    override_group.add_argument('--min-vesselness', type=float,
+                             help='Minimum vesselness threshold (default: 0.05)')
+    override_group.add_argument('--roi-multiplier', type=float,
+                             help='ROI size multiplier (default: 1.5)')
+    override_group.add_argument('--min-radius-cyl', type=float,
+                             help='Minimum cylinder radius in mm (default: 3.0)')
+    override_group.add_argument('--min-radius-sphere', type=float,
+                             help='Minimum sphere radius in mm (default: 4.0)')
+    override_group.add_argument('--max-segment-length', type=int,
+                             help='Maximum segment length in voxels (default: 20)')
+    override_group.add_argument('--overlap', type=int,
+                             help='Segment overlap in voxels (default: 5)')
+    
+    args = parser.parse_args()
+    
+    # Collect custom parameters if any are specified
+    custom_params = {}
+    if args.min_vesselness is not None:
+        custom_params['min_vesselness'] = args.min_vesselness
+    if args.roi_multiplier is not None:
+        custom_params['roi_multiplier'] = args.roi_multiplier
+    if args.min_radius_cyl is not None:
+        custom_params['min_radius_cyl'] = args.min_radius_cyl
+    if args.min_radius_sphere is not None:
+        custom_params['min_radius_sphere'] = args.min_radius_sphere
+    if args.max_segment_length is not None:
+        custom_params['max_segment_length'] = args.max_segment_length
+    if args.overlap is not None:
+        custom_params['overlap'] = args.overlap
+    
+    args.custom_params = custom_params if custom_params else None
+    return args
+
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Vessel segmentation pipeline')
-    parser.add_argument('--input', default='image_data/ct.nrrd', help='Input image path')
-    parser.add_argument('--intermediate-dir', default='intermediate_results', help='Directory for intermediate results')
-    parser.add_argument('--output-dir', default='output', help='Directory for final results')
-    parser.add_argument('--load-hessian', action='store_true', help='Load pre-computed Hessian results if available')
-    parser.add_argument('--skip-to-threshold', action='store_true', help='Skip to thresholding step (load vesselness results)')
-    args = parser.parse_args()
+    args = parse_args()
     
     # Create output directories
     os.makedirs(args.intermediate_dir, exist_ok=True)
@@ -127,9 +175,16 @@ def main():
         centerlines,
         point_types,
         sigma_max,
-        vessel_direction
+        vessel_direction,
+        parameter_set=args.parameter_set
     )
-    save_local_threshold_results(final_vessels, local_thresholds, args.output_dir)
+    save_local_threshold_results(
+        final_vessels, 
+        local_thresholds, 
+        args.output_dir,
+        parameter_set=args.parameter_set,
+        custom_params=args.custom_params
+    )
     
     print("Segmentation complete!")
 

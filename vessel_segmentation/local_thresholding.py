@@ -12,13 +12,79 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ROIParameters:
-    """Parameters for ROI generation"""
+    """Parameters for ROI generation and local thresholding
+    
+    Parameters:
+        min_radius_cyl: float = 3.0 (mm)
+            Minimum radius for cylindrical ROIs around vessel segments.
+            - Smaller values: Can capture thinner vessels but may introduce noise
+            - Larger values: More stable but might miss small vessels
+            
+        min_radius_sphere: float = 4.0 (mm)
+            Minimum radius for spherical ROIs at bifurcations/endpoints.
+            - Smaller values: Better detail at junctions but may fragment
+            - Larger values: More stable junctions but may blur details
+            
+        roi_multiplier: float = 1.5
+            Multiplier for ROI size relative to vessel scale (sigma_max).
+            - Smaller values (<1.5): Tighter ROIs, less leakage but may miss vessel boundaries
+            - Larger values (>1.5): Larger ROIs, better vessel recovery but potential leakage
+            
+        max_segment_length: int = 20 (voxels)
+            Maximum length of vessel segments before splitting.
+            - Smaller values: Better local adaptation but more computation
+            - Larger values: Faster but may miss local variations
+            
+        overlap: int = 5 (voxels)
+            Overlap between split segments to ensure continuity.
+            - Smaller values: Less computation but potential discontinuities
+            - Larger values: Better continuity but more computation
+            
+        min_vesselness: float = 0.05
+            Minimum vesselness threshold to prevent leakage.
+            - Smaller values (<0.05): More vessel recovery but potential leakage
+            - Larger values (>0.05): Less leakage but may miss weak vessels
+    """
     min_radius_cyl: float = 3.0  # mm
     min_radius_sphere: float = 4.0  # mm
     roi_multiplier: float = 1.5
     max_segment_length: int = 20  # voxels
     overlap: int = 5  # voxels
     min_vesselness: float = 0.05
+    
+    @classmethod
+    def get_parameter_sets(cls):
+        """Get different parameter sets to try"""
+        return {
+            'default': cls(),
+            'aggressive': cls(
+                min_vesselness=0.03,  # Lower threshold to include more vessels
+                roi_multiplier=1.8,   # Larger ROI to capture more surrounding area
+                min_radius_cyl=2.5,   # Smaller minimum radius to catch thin vessels
+                min_radius_sphere=3.5  # Smaller sphere radius for detailed bifurcations
+            ),
+            'very_aggressive': cls(
+                min_vesselness=0.02,  # Very low threshold for maximum vessel recovery
+                roi_multiplier=2.0,   # Much larger ROI for maximum capture
+                min_radius_cyl=2.0,   # Very small radius to catch smallest vessels
+                min_radius_sphere=3.0  # Small sphere radius for detailed junctions
+            ),
+            'conservative': cls(
+                min_vesselness=0.06,  # Higher threshold to prevent leakage
+                roi_multiplier=1.3,   # Smaller ROI for tight vessel boundaries
+                min_radius_cyl=3.5,   # Larger minimum radius for stability
+                min_radius_sphere=4.5  # Larger sphere radius for stable junctions
+            )
+        }
+    
+    @classmethod
+    def from_dict(cls, params_dict):
+        """Create parameters from dictionary of overrides"""
+        base_params = cls()
+        for key, value in params_dict.items():
+            if hasattr(base_params, key):
+                setattr(base_params, key, value)
+        return base_params
 
 @dataclass
 class QualityReport:
@@ -142,10 +208,20 @@ def create_cylindrical_roi(points, centerline_points, direction, radius):
     # Points are inside if minimum distance is less than radius
     return min_distances <= radius
 
-def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_types, sigma_max, vessel_directions):
-    """Perform local optimal thresholding around centerlines"""
+def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_types, sigma_max, vessel_directions, parameter_set='default'):
+    """Perform local optimal thresholding around centerlines
+    
+    Args:
+        binary_vessels: Initial binary vessel mask
+        vesselness: Vesselness measure
+        centerlines: Centerline points
+        point_types: Point type labels
+        sigma_max: Maximum scale at each point
+        vessel_directions: Vessel directions
+        parameter_set: Which parameter set to use ('default', 'aggressive', 'very_aggressive', 'conservative')
+    """
     # Initialize parameters
-    params = ROIParameters()
+    params = ROIParameters.get_parameter_sets()[parameter_set]
     image_shape = vesselness.shape
     
     # Initialize output
@@ -405,37 +481,56 @@ def optimal_threshold(intensities):
     
     return t
 
-def save_local_threshold_results(final_vessels, local_thresholds, output_dir):
+def save_local_threshold_results(final_vessels, local_thresholds, output_dir, parameter_set='default', custom_params=None):
     """Save local thresholding results and metadata
     
     Args:
         final_vessels: Binary mask of final vessel segmentation
         local_thresholds: Array of local threshold values used
         output_dir: Directory to save results
+        parameter_set: Name of parameter set used ('default', 'aggressive', etc.)
+        custom_params: Dictionary of custom parameter values if used
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    # Save binary mask
+    # Create filename suffix based on parameters
+    if custom_params:
+        # Create a compact representation of custom parameters
+        param_str = '_'.join(f"{k}{v}" for k, v in sorted(custom_params.items()))
+        suffix = f"_custom_{param_str}"
+    else:
+        suffix = f"_{parameter_set}" if parameter_set != 'default' else ''
+    
+    # Save binary mask with parameter info
     sitk.WriteImage(
         sitk.GetImageFromArray(final_vessels.astype(np.uint8)),
-        os.path.join(output_dir, 'final_vessels.nrrd')
+        os.path.join(output_dir, f'final_vessels{suffix}.nrrd')
     )
     
-    # Save local thresholds
+    # Save local thresholds with parameter info
     sitk.WriteImage(
         sitk.GetImageFromArray(local_thresholds),
-        os.path.join(output_dir, 'local_thresholds.nrrd')
+        os.path.join(output_dir, f'local_thresholds{suffix}.nrrd')
     )
+    
+    # Get parameters used
+    if custom_params:
+        params = ROIParameters.from_dict(custom_params)
+    else:
+        params = ROIParameters.get_parameter_sets()[parameter_set]
     
     # Save metadata
     metadata = {
         "parameters": {
-            "min_vesselness": 0.05,
-            "roi_multiplier": 1.5,
-            "min_radius_cyl": 3.0,
-            "min_radius_sphere": 4.0
+            "min_vesselness": params.min_vesselness,
+            "roi_multiplier": params.roi_multiplier,
+            "min_radius_cyl": params.min_radius_cyl,
+            "min_radius_sphere": params.min_radius_sphere,
+            "max_segment_length": params.max_segment_length,
+            "overlap": params.overlap,
+            "parameter_set": parameter_set if not custom_params else "custom"
         }
     }
     
-    with open(os.path.join(output_dir, 'segmentation_metadata.json'), 'w') as f:
+    with open(os.path.join(output_dir, f'segmentation_metadata{suffix}.json'), 'w') as f:
         json.dump(metadata, f, indent=2)
