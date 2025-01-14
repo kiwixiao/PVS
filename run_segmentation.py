@@ -10,9 +10,9 @@ from vessel_segmentation.local_thresholding import local_optimal_thresholding, s
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Vessel segmentation pipeline with customizable parameters')
-    parser.add_argument('--input', type=str, default='input/image.nrrd',
+    parser.add_argument('--input', type=str, default='image_data/ct.nrrd',
                       help='Input image file')
-    parser.add_argument('--intermediate-dir', type=str, default='intermediate',
+    parser.add_argument('--intermediate-dir', type=str, default='intermediate_results',
                       help='Directory for intermediate results')
     parser.add_argument('--output-dir', type=str, default='output',
                       help='Directory for final results')
