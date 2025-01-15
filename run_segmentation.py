@@ -252,7 +252,7 @@ def main():
         print()
         
         # Calculate vesselness using eroded mask
-        vesselness, sigma_max, vessel_direction, filtered_vesselness = calculate_vesselness(
+        vesselness, sigma_max, vessel_direction = calculate_vesselness(
             image_array,
             eroded_mask,
             scales,
@@ -260,11 +260,6 @@ def main():
         )
         save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dirs['intermediate'])
         
-        # Save filtered vesselness separately
-        sitk.WriteImage(
-            sitk.GetImageFromArray(filtered_vesselness),
-            os.path.join(output_dirs['intermediate'], 'filtered_vesselness.nrrd')
-        )
     else:
         # Load pre-computed vesselness results
         print("Loading pre-computed vesselness results...")
@@ -310,13 +305,7 @@ def main():
         parameter_set=args.parameter_set
     )
     
-    # Filter disconnected components from final vessels
-    print("\nFiltering disconnected components from final segmentation...")
-    filtered_vessels = filter_disconnected_components(final_vessels, 
-                                                    min_component_size=50,
-                                                    connectivity=26)
-    
-    # Save both original and filtered results
+    # Save original results first
     save_local_threshold_results(
         final_vessels, 
         local_thresholds, 
@@ -325,6 +314,12 @@ def main():
         parameter_set=args.parameter_set,
         custom_params=args.custom_params
     )
+    
+    # Filter disconnected components from final vessels
+    print("\nFiltering disconnected components from final segmentation...")
+    filtered_vessels = filter_disconnected_components(final_vessels, 
+                                                    min_component_size=50,
+                                                    connectivity=26)
     
     # Save filtered vessels separately
     sitk.WriteImage(
