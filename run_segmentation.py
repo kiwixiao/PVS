@@ -193,10 +193,11 @@ def main():
             print(f"Using scales: {scales}")
             
             vesselness_results = calculate_vesselness(
-                deconv_image,  # Pass deconvolved image
-                eroded_mask,   # Pass eroded mask separately
+                deconv_image,
+                eroded_mask,
                 scales,
-                output_dir=output_dirs['intermediate']
+                output_dir=output_dirs['intermediate'],
+                project_name=args.project_name
             )
             
             # Save vesselness results

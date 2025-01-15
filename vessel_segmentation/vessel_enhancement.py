@@ -5,8 +5,9 @@ import os
 import gc
 from scipy import fftpack
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
-def calculate_vesselness(image_array, mask, scales, output_dir=None):
+def calculate_vesselness(image_array, mask, scales, output_dir=None, project_name=None):
     """Calculate vesselness measure using Frangi's method with scale optimization.
     
     Args:
@@ -14,19 +15,21 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
         mask: Binary mask of regions to process
         scales: Array of scales to use
         output_dir: Directory to save results
+        project_name: Name of the project for file naming
     """
     # Initialize results
     vesselness = np.zeros_like(image_array)
     sigma_max = np.zeros_like(image_array)
     vessel_direction = np.zeros((*image_array.shape, 3))
     
-    # Initialize scale optimization records
+    # Initialize scale optimization records with enhanced visualization data
     scale_records = {
         'metadata': {
             'initial_scales': scales.tolist(),
             'kernel_size': 5,
             'optimization_params': {
-                'learning_rate': 0.1,
+                'base_lr': 0.1,
+                'momentum': 0.9,
                 'max_iterations': 10,
                 'convergence_threshold': 1e-4
             }
@@ -35,7 +38,18 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
         'statistics': {
             'total_points_optimized': 0,
             'average_improvement': 0.0,
+            'average_iterations': 0.0,
+            'convergence_stats': {
+                'iterations_histogram': [],  # Will store iteration counts
+                'scale_changes': [],        # Will store final scale changes
+                'vesselness_improvements': [] # Will store vesselness improvements
+            },
             'scale_distribution': {}
+        },
+        'visualization_data': {
+            'convergence_plots': [],  # Will store data for selected points
+            'learning_rate_plots': [], # Will store learning rate adaptation
+            'scale_trajectory_plots': [] # Will store scale changes
         }
     }
     
@@ -88,6 +102,7 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
             positions = np.where(update_mask)
             optimized_scales = []
             improvements = []
+            iterations_counts = []
             
             for i in tqdm(range(len(positions[0])), desc="Optimizing scales", leave=False):
                 z, y, x = positions[0][i], positions[1][i], positions[2][i]
@@ -96,17 +111,34 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
                 optimal_scale, trajectory = optimize_scale(image_array, scale, (z,y,x))
                 optimized_scales.append(optimal_scale)
                 improvements.append(optimal_scale - scale)
+                iterations_counts.append(len(trajectory))
                 
-                # Record optimization details
-                scale_records['optimizations'].append({
+                # Record optimization details with enhanced visualization data
+                optimization_record = {
                     'position': [int(z), int(y), int(x)],
                     'initial_scale': float(scale),
                     'optimal_scale': float(optimal_scale),
                     'improvement': float(optimal_scale - scale),
+                    'iterations': len(trajectory),
                     'trajectory': trajectory,
                     'initial_response': float(vesselness[z,y,x]),
-                    'final_response': None  # Will be updated after recalculation
-                })
+                    'final_response': None,  # Will be updated after recalculation
+                    'convergence_data': {
+                        'scales': [t['scale'] for t in trajectory],
+                        'vesselness': [t['vesselness'] for t in trajectory],
+                        'learning_rates': [t['learning_rate'] for t in trajectory],
+                        'gradients': [t['gradient'] if 'gradient' in t else None for t in trajectory],
+                        'velocities': [t['velocity'] if 'velocity' in t else None for t in trajectory]
+                    }
+                }
+                
+                # Store first few optimizations for visualization
+                if len(scale_records['visualization_data']['convergence_plots']) < 10:
+                    scale_records['visualization_data']['convergence_plots'].append({
+                        'position': [int(z), int(y), int(x)],
+                        'scale': float(scale),
+                        'convergence_data': optimization_record['convergence_data']
+                    })
                 
                 # Recalculate vesselness at optimal scale
                 hessian_opt = calculate_hessian_at_point(image_array, optimal_scale, (z,y,x))
@@ -130,6 +162,16 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
                     ])
                     _, v = np.linalg.eigh(H)
                     vessel_direction[z,y,x] = v[:,0]
+                
+                # Update statistics
+                scale_records['statistics']['convergence_stats']['iterations_histogram'].append(len(trajectory))
+                scale_records['statistics']['convergence_stats']['scale_changes'].append(float(optimal_scale - scale))
+                scale_records['statistics']['convergence_stats']['vesselness_improvements'].append(
+                    float(vesselness_opt - vesselness[z,y,x])
+                )
+            
+            # Update overall statistics
+            scale_records['statistics']['average_iterations'] = float(np.mean(iterations_counts))
             
             # Update statistics
             scale_records['statistics']['total_points_optimized'] += len(positions[0])
@@ -143,11 +185,17 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
                 'mean_optimal_scale': float(np.mean(optimized_scales))
             }
     
-    # Save scale optimization records
-    if output_dir:
+    # Save scale optimization records with visualization data
+    if output_dir and project_name:
         import json
-        with open(os.path.join(output_dir, 'scale_optimization.json'), 'w') as f:
+        
+        # Save optimization records
+        optimization_file = os.path.join(output_dir, f'{project_name}_scale_optimization.json')
+        with open(optimization_file, 'w') as f:
             json.dump(scale_records, f, indent=2)
+        
+        # Create and save plots
+        plot_convergence_data(scale_records, output_dir, project_name)
     
     return {
         'vesselness': vesselness,
@@ -286,26 +334,34 @@ def frangi_vesselness(eigenvalues, image_array):
     
     return vesselness
 
-def optimize_scale(image_array, initial_scale, position, learning_rate=0.1, max_iter=10):
-    """Optimize scale using gradient descent for maximum vesselness response
+def optimize_scale(image_array, initial_scale, position, base_lr=0.1, momentum=0.9, max_iter=10):
+    """Optimize scale using gradient descent with momentum and adaptive learning rate
     
     Args:
         image_array: Input image array
         initial_scale: Initial scale value
         position: (z,y,x) position to optimize scale at
-        learning_rate: Learning rate for gradient descent
+        base_lr: Base learning rate (will be adapted)
+        momentum: Momentum coefficient
         max_iter: Maximum iterations
     """
     scale = initial_scale
     z, y, x = position
     
-    # Record optimization trajectory with more details
+    # Initialize momentum and adaptive learning rate
+    velocity = 0.0
+    prev_gradient = None
+    adaptive_lr = base_lr
+    
     trajectory = [{
         'iteration': 0,
         'scale': float(scale),
         'vesselness': None,
-        'gradient': None
+        'gradient': None,
+        'learning_rate': float(adaptive_lr)
     }]
+    
+    prev_vesselness = None
     
     for iter_num in range(max_iter):
         # Calculate vesselness at current scale and neighboring scales
@@ -328,22 +384,45 @@ def optimize_scale(image_array, initial_scale, position, learning_rate=0.1, max_
         # Estimate gradient using central difference
         gradient = (v_plus - v_minus) / (2 * delta)
         
-        # Update scale using gradient ascent (since we want maximum response)
-        new_scale = scale + learning_rate * gradient
+        # Adapt learning rate based on gradient behavior
+        if prev_gradient is not None:
+            # If gradient direction changed, reduce learning rate
+            if gradient * prev_gradient < 0:
+                adaptive_lr *= 0.5
+            # If gradient direction same, slowly increase learning rate
+            else:
+                adaptive_lr *= 1.1
+            
+            # Bound learning rate
+            adaptive_lr = np.clip(adaptive_lr, 0.01 * base_lr, 10 * base_lr)
         
-        # Record this iteration with more details
+        # Update velocity (momentum)
+        velocity = momentum * velocity + adaptive_lr * gradient
+        
+        # Update scale using momentum
+        new_scale = scale + velocity
+        
+        # Record this iteration
         trajectory.append({
             'iteration': iter_num + 1,
             'scale': float(new_scale),
             'vesselness': float(v),
-            'gradient': float(gradient)
+            'gradient': float(gradient),
+            'learning_rate': float(adaptive_lr),
+            'velocity': float(velocity)
         })
         
-        # Check convergence
-        if abs(new_scale - scale) < 1e-4:
+        # Check convergence based on both scale and vesselness change
+        scale_change = abs(new_scale - scale)
+        vesselness_change = abs(v - prev_vesselness) if prev_vesselness is not None else float('inf')
+        
+        if scale_change < 1e-4 and vesselness_change < 1e-6:
             break
             
+        # Update for next iteration
         scale = new_scale
+        prev_gradient = gradient
+        prev_vesselness = v
         
         # Keep scale within reasonable bounds
         scale = np.clip(scale, 0.6, 6.0)
@@ -468,3 +547,92 @@ def deconvolve_image(image_array, kernel_size=5, sigma=0.6):
     deconv = np.real(fftpack.ifftn(deconv_fft))
     
     return deconv
+
+def plot_convergence_data(plot_data, output_dir, project_name):
+    """Create and save convergence plots for scale optimization
+    
+    Args:
+        plot_data: Dictionary containing convergence data
+        output_dir: Directory to save plots
+        project_name: Name of the project for file naming
+    """
+    # Create plots directory if it doesn't exist
+    plots_dir = os.path.join(output_dir, 'optimization_plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Plot convergence for example points
+    for idx, plot in enumerate(plot_data['convergence_plots']):
+        plt.figure(figsize=(15, 10))
+        
+        # Plot scale convergence
+        plt.subplot(2,2,1)
+        plt.plot(plot['convergence_data']['scales'], '-o')
+        plt.title(f'Scale Convergence\nPosition: {plot["position"]}')
+        plt.xlabel('Iteration')
+        plt.ylabel('Scale')
+        plt.grid(True)
+        
+        # Plot learning rate adaptation
+        plt.subplot(2,2,2)
+        plt.plot(plot['convergence_data']['learning_rates'], '-o')
+        plt.title('Learning Rate Adaptation')
+        plt.xlabel('Iteration')
+        plt.ylabel('Learning Rate')
+        plt.grid(True)
+        
+        # Plot vesselness improvement
+        plt.subplot(2,2,3)
+        plt.plot(plot['convergence_data']['vesselness'], '-o')
+        plt.title('Vesselness Improvement')
+        plt.xlabel('Iteration')
+        plt.ylabel('Vesselness')
+        plt.grid(True)
+        
+        # Plot gradient magnitude
+        plt.subplot(2,2,4)
+        plt.plot([abs(g) if g is not None else 0 for g in plot['convergence_data']['gradients']], '-o')
+        plt.title('Gradient Magnitude')
+        plt.xlabel('Iteration')
+        plt.ylabel('|Gradient|')
+        plt.grid(True)
+        
+        plt.suptitle(f'Scale Optimization Convergence - Point {idx+1}\nInitial Scale: {plot["scale"]:.3f}')
+        plt.tight_layout()
+        
+        # Save plot
+        plt.savefig(os.path.join(plots_dir, f'{project_name}_convergence_point_{idx+1}.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    # Create summary statistics plots
+    plt.figure(figsize=(15, 5))
+    
+    # Plot iteration histogram
+    plt.subplot(1,3,1)
+    plt.hist(plot_data['statistics']['convergence_stats']['iterations_histogram'], bins=20)
+    plt.title('Iteration Count Distribution')
+    plt.xlabel('Number of Iterations')
+    plt.ylabel('Count')
+    plt.grid(True)
+    
+    # Plot scale changes
+    plt.subplot(1,3,2)
+    plt.hist(plot_data['statistics']['convergence_stats']['scale_changes'], bins=20)
+    plt.title('Scale Changes Distribution')
+    plt.xlabel('Scale Change')
+    plt.ylabel('Count')
+    plt.grid(True)
+    
+    # Plot vesselness improvements
+    plt.subplot(1,3,3)
+    plt.hist(plot_data['statistics']['convergence_stats']['vesselness_improvements'], bins=20)
+    plt.title('Vesselness Improvement Distribution')
+    plt.xlabel('Vesselness Improvement')
+    plt.ylabel('Count')
+    plt.grid(True)
+    
+    plt.suptitle('Optimization Statistics Summary')
+    plt.tight_layout()
+    
+    # Save summary plot
+    plt.savefig(os.path.join(plots_dir, f'{project_name}_optimization_summary.png'), dpi=300, bbox_inches='tight')
+    plt.close()
