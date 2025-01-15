@@ -5,7 +5,7 @@ import os
 import gc
 from scipy import linalg
 
-def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessian=True):
+def calculate_vesselness(image_array, mask, scales, output_dir=None):
     """Calculate vesselness measure using multi-scale Hessian analysis
     
     Args:
@@ -13,7 +13,6 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessia
         mask: Binary mask (eroded mask)
         scales: List of scales for Hessian calculation
         output_dir: Directory to save intermediate results
-        load_hessian: Whether to load pre-computed results if available
     """
     # Convert mask to uint8 (this should be the eroded mask)
     mask = mask.astype(np.uint8)
@@ -27,8 +26,8 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessia
             os.path.join(output_dir, 'masked_image_for_hessian.nrrd')
         )
     
-    # Check if we can load pre-computed results
-    if output_dir and load_hessian:
+    # Always try to load pre-computed results first if output directory is provided
+    if output_dir:
         required_files = [
             'vesselness.nrrd',
             'sigma_max.nrrd',
@@ -40,10 +39,7 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessia
             missing_files = [f for f in required_files 
                            if not os.path.exists(os.path.join(output_dir, f))]
             
-            if missing_files:
-                print(f"Missing required files: {missing_files}")
-                print("Computing vesselness from scratch...")
-            else:
+            if not missing_files:
                 print("Loading pre-computed vesselness results...")
                 vesselness = sitk.GetArrayFromImage(sitk.ReadImage(
                     os.path.join(output_dir, 'vesselness.nrrd')))
@@ -53,6 +49,9 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessia
                     os.path.join(output_dir, 'vessel_direction.nrrd')))
                 print("Successfully loaded all pre-computed results")
                 return vesselness, sigma_max, vessel_direction
+            else:
+                print(f"Missing required files: {missing_files}")
+                print("Computing vesselness from scratch...")
                 
         except Exception as e:
             print(f"Error loading pre-computed results: {e}")

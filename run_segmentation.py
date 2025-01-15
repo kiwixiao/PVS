@@ -14,8 +14,6 @@ def parse_args():
                       help='Input image file')
     parser.add_argument('--project-name', type=str, default='default',
                       help='Project name for organizing output files')
-    parser.add_argument('--load-hessian', action='store_true',
-                      help='Load pre-computed Hessian results')
     parser.add_argument('--skip-to-threshold', action='store_true',
                       help='Skip to thresholding step')
     
@@ -139,7 +137,6 @@ def main():
         scales = np.exp(np.linspace(np.log(min_scale), np.log(max_scale), num_scales))
         
         # Calculate approximate vessel diameters detectable at each scale
-        # Using the relationship: vessel_diameter ≈ scale * 2 * sqrt(2)
         vessel_diameters = scales * 2 * np.sqrt(2)
         print("\nScale progression and corresponding vessel diameters:")
         for i, (scale, diameter) in enumerate(zip(scales, vessel_diameters)):
@@ -150,8 +147,7 @@ def main():
             image_array,
             eroded_mask,
             scales,
-            output_dirs['intermediate'],
-            load_hessian=args.load_hessian
+            output_dirs['intermediate']
         )
         save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dirs['intermediate'])
     else:
