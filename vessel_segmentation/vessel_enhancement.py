@@ -373,15 +373,20 @@ def optimize_scale(image_array, initial_scale, position, base_lr=0.1, momentum=0
     prev_gradient = None
     adaptive_lr = base_lr
     
+    # Calculate initial vesselness
+    hessian = calculate_hessian_at_point(image_array, scale, position)
+    eig = calculate_eigenvalues_at_point(hessian)
+    v = frangi_vesselness_at_point(eig, image_array[z,y,x]) * scale
+    
     trajectory = [{
         'iteration': 0,
         'scale': float(scale),
-        'vesselness': None,
+        'vesselness': float(v),
         'gradient': None,
         'learning_rate': float(adaptive_lr)
     }]
     
-    prev_vesselness = None
+    prev_vesselness = v
     
     for iter_num in range(max_iter):
         # Calculate vesselness at current scale and neighboring scales
