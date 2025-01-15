@@ -7,6 +7,7 @@ from scipy import fftpack
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from scipy import linalg
+import seaborn as sns
 
 def calculate_vesselness(image_array, mask, scales, output_dir=None, project_name=None):
     """Calculate vesselness measure using Frangi's method with scale optimization.
@@ -34,31 +35,44 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                 'convergence_threshold': 1e-4
             }
         },
-        'statistics': {
-            'total_points_optimized': 0,
-            'average_iterations': 0.0,
-            'scale_distribution': {},
-            'convergence_stats': {
-                'iterations_histogram': [],
-                'scale_changes': [],
-                'vesselness_improvements': []
+        'scale_statistics': {  # Track statistics per scale
+            'total_points': {},  # Number of points optimized at each scale
+            'average_improvement': {},  # Average scale improvement at each scale
+            'average_iterations': {},  # Average iterations needed at each scale
+            'final_scale_distribution': {},  # Distribution of final scales
+            'convergence_stats': {  # Per-scale convergence statistics
+                'min_iterations': {},
+                'max_iterations': {},
+                'avg_iterations': {},
+                'avg_improvement': {},
+                'std_improvement': {}
             }
         },
-        'visualization_data': {
-            'example_points': []  # Will store only 5 representative points
-        },
-        'optimizations': []  # Initialize empty list for optimization records
+        'example_points': {}  # Store 2-3 representative points per scale
     }
     
     # Process each scale
     for scale_idx, scale in enumerate(tqdm(scales, desc="Processing scales")):
         print(f"Processing scale {scale:.3f}mm")
         
+        # Initialize per-scale statistics
+        scale_key = f'scale_{scale:.3f}'
+        scale_records['scale_statistics']['total_points'][scale_key] = 0
+        scale_records['scale_statistics']['average_improvement'][scale_key] = 0.0
+        scale_records['scale_statistics']['average_iterations'][scale_key] = 0.0
+        scale_records['example_points'][scale_key] = []
+        
         # Calculate Hessian and vesselness at this scale
         current_vesselness = np.zeros_like(image_array)
         
         # Process points within mask
         points = np.where(mask > 0)
+        
+        # Track statistics for this scale
+        total_points = 0
+        improvements = []
+        iterations_counts = []
+        
         for i in tqdm(range(len(points[0])), desc=f"Scale {scale:.3f}mm", leave=False):
             z, y, x = points[0][i], points[1][i], points[2][i]
             
@@ -110,53 +124,24 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                 improvements.append(optimal_scale - scale)
                 iterations_counts.append(len(trajectory))
                 
-                # Record optimization details with enhanced visualization data
-                optimization_record = {
-                    'position': [int(z), int(y), int(x)],
-                    'initial_scale': float(scale),
-                    'optimal_scale': float(optimal_scale),
-                    'improvement': float(optimal_scale - scale),
-                    'iterations': len(trajectory),
-                    'trajectory': trajectory,
-                    'initial_response': float(vesselness[z,y,x]),
-                    'final_response': None,  # Will be updated after recalculation
-                    'convergence_data': {
-                        'scales': [t['scale'] for t in trajectory],
-                        'vesselness': [t['vesselness'] for t in trajectory],
-                        'learning_rates': [t['learning_rate'] for t in trajectory],
-                        'gradients': [t['gradient'] if 'gradient' in t else None for t in trajectory],
-                        'velocities': [t['velocity'] if 'velocity' in t else None for t in trajectory]
-                    }
-                }
-                
-                # Add the record to the list before updating it
-                scale_records['optimizations'].append(optimization_record)
-                
-                # Store only 5 representative points for visualization
-                if len(scale_records['visualization_data']['example_points']) < 5:
+                # Store example points (only first 2-3 points per scale)
+                if len(scale_records['example_points'][scale_key]) < 3:
                     example_point = {
                         'position': [int(z), int(y), int(x)],
                         'initial_scale': float(scale),
                         'optimal_scale': float(optimal_scale),
                         'improvement': float(optimal_scale - scale),
                         'iterations': len(trajectory),
-                        'convergence': {
-                            'scales': [float(t['scale']) for t in trajectory],
-                            'vesselness': [float(t['vesselness']) for t in trajectory]
-                        }
+                        'trajectory': trajectory
                     }
-                    scale_records['visualization_data']['example_points'].append(example_point)
+                    scale_records['example_points'][scale_key].append(example_point)
                 
-                # Recalculate vesselness at optimal scale
+                # Update if optimized response is better
                 hessian_opt = calculate_hessian_at_point(image_array, optimal_scale, (z,y,x))
                 eigenvalues_opt = calculate_eigenvalues_at_point(hessian_opt)
                 vesselness_opt = frangi_vesselness_at_point(eigenvalues_opt, image_array[z,y,x])
                 vesselness_opt *= optimal_scale  # γ-normalization
                 
-                # Update the optimization record with final response
-                scale_records['optimizations'][-1]['final_response'] = float(vesselness_opt)
-                
-                # Update if optimized response is better
                 if vesselness_opt > vesselness[z,y,x]:
                     vesselness[z,y,x] = vesselness_opt
                     sigma_max[z,y,x] = optimal_scale
@@ -169,30 +154,26 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                     ])
                     _, v = np.linalg.eigh(H)
                     vessel_direction[z,y,x] = v[:,0]
-                
-                # Update statistics
-                scale_records['statistics']['convergence_stats']['iterations_histogram'].append(len(trajectory))
-                scale_records['statistics']['convergence_stats']['scale_changes'].append(float(optimal_scale - scale))
-                scale_records['statistics']['convergence_stats']['vesselness_improvements'].append(
-                    float(vesselness_opt - vesselness[z,y,x])
-                )
             
-            # Update overall statistics
-            scale_records['statistics']['average_iterations'] = float(np.mean(iterations_counts))
+            # Update scale statistics
+            scale_records['scale_statistics']['total_points'][scale_key] = len(positions[0])
+            scale_records['scale_statistics']['average_improvement'][scale_key] = float(np.mean(improvements))
+            scale_records['scale_statistics']['average_iterations'][scale_key] = float(np.mean(iterations_counts))
             
-            # Update statistics
-            scale_records['statistics']['total_points_optimized'] += len(positions[0])
-            scale_records['statistics']['average_improvement'] = np.mean(improvements)
-            scale_records['statistics']['scale_distribution'][f'scale_{scale:.3f}'] = {
-                'points_optimized': len(positions[0]),
-                'average_improvement': float(np.mean(improvements)),
-                'std_improvement': float(np.std(improvements)),
-                'min_optimal_scale': float(np.min(optimized_scales)),
-                'max_optimal_scale': float(np.max(optimized_scales)),
-                'mean_optimal_scale': float(np.mean(optimized_scales))
+            # Update convergence statistics
+            scale_records['scale_statistics']['convergence_stats']['min_iterations'][scale_key] = int(np.min(iterations_counts))
+            scale_records['scale_statistics']['convergence_stats']['max_iterations'][scale_key] = int(np.max(iterations_counts))
+            scale_records['scale_statistics']['convergence_stats']['avg_iterations'][scale_key] = float(np.mean(iterations_counts))
+            scale_records['scale_statistics']['convergence_stats']['avg_improvement'][scale_key] = float(np.mean(improvements))
+            scale_records['scale_statistics']['convergence_stats']['std_improvement'][scale_key] = float(np.std(improvements))
+            
+            # Update final scale distribution
+            unique_scales, counts = np.unique(optimized_scales, return_counts=True)
+            scale_records['scale_statistics']['final_scale_distribution'][scale_key] = {
+                f'{s:.3f}': int(c) for s, c in zip(unique_scales, counts)
             }
     
-    # Save scale optimization records with visualization data
+    # Save scale optimization records
     if output_dir and project_name:
         import json
         
@@ -573,87 +554,134 @@ def deconvolve_image(image_array, kernel_size=5, sigma=0.6):
     
     return deconv
 
-def plot_convergence_data(plot_data, output_dir, project_name):
-    """Create and save convergence plots for scale optimization
+def plot_convergence_data(scale_records, output_dir, project_name):
+    """Create visualization plots for scale optimization data.
     
     Args:
-        plot_data: Dictionary containing convergence data
+        scale_records: Dictionary containing scale optimization records
         output_dir: Directory to save plots
         project_name: Name of the project for file naming
     """
-    # Check if plot data contains required fields
-    if not plot_data or 'statistics' not in plot_data:
-        print("No convergence data available for plotting")
-        return
-        
-    # Create plots directory if it doesn't exist
+    # Create plots directory
     plots_dir = os.path.join(output_dir, 'optimization_plots')
     os.makedirs(plots_dir, exist_ok=True)
     
-    # Plot convergence for example points if available
-    if 'visualization_data' in plot_data and 'example_points' in plot_data['visualization_data']:
-        for idx, plot in enumerate(plot_data['visualization_data']['example_points']):
-            plt.figure(figsize=(15, 10))
-            
-            # Plot scale convergence
-            plt.subplot(2,2,1)
-            plt.plot(plot['convergence']['scales'], '-o')
-            plt.title(f'Scale Convergence\nPosition: {plot["position"]}')
-            plt.xlabel('Iteration')
-            plt.ylabel('Scale')
-            plt.grid(True)
-            
-            # Plot vesselness improvement
-            plt.subplot(2,2,2)
-            plt.plot(plot['convergence']['vesselness'], '-o')
-            plt.title('Vesselness Improvement')
-            plt.xlabel('Iteration')
-            plt.ylabel('Vesselness')
-            plt.grid(True)
-            
-            plt.suptitle(f'Scale Optimization Convergence - Point {idx+1}\nInitial Scale: {plot["initial_scale"]:.3f}')
-            plt.tight_layout()
-            
-            # Save plot
-            plt.savefig(os.path.join(plots_dir, f'{project_name}_convergence_point_{idx+1}.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+    # Extract scales and prepare data
+    scales = [float(scale.split('_')[1]) for scale in scale_records['scale_statistics']['total_points'].keys()]
+    scales.sort()
     
-    # Create summary statistics plots if available
-    if ('statistics' in plot_data and 
-        'convergence_stats' in plot_data['statistics'] and 
-        len(plot_data['statistics']['convergence_stats']['iterations_histogram']) > 0):
+    # 1. Plot scale statistics overview
+    plt.figure(figsize=(12, 8))
+    plt.subplot(2, 1, 1)
+    
+    # Plot total points and average iterations
+    ax1 = plt.gca()
+    ax2 = ax1.twinx()
+    
+    total_points = [scale_records['scale_statistics']['total_points'][f'scale_{s:.3f}'] for s in scales]
+    avg_iterations = [scale_records['scale_statistics']['average_iterations'][f'scale_{s:.3f}'] for s in scales]
+    
+    ax1.plot(scales, total_points, 'b-', label='Total Points')
+    ax2.plot(scales, avg_iterations, 'r--', label='Avg Iterations')
+    
+    ax1.set_xlabel('Initial Scale (mm)')
+    ax1.set_ylabel('Number of Points', color='b')
+    ax2.set_ylabel('Average Iterations', color='r')
+    
+    # Add legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+    
+    plt.title('Scale Optimization Overview')
+    
+    # 2. Plot improvements distribution
+    plt.subplot(2, 1, 2)
+    improvements = [scale_records['scale_statistics']['average_improvement'][f'scale_{s:.3f}'] for s in scales]
+    std_improvements = [scale_records['scale_statistics']['convergence_stats']['std_improvement'][f'scale_{s:.3f}'] for s in scales]
+    
+    plt.errorbar(scales, improvements, yerr=std_improvements, fmt='o-', capsize=5)
+    plt.xlabel('Initial Scale (mm)')
+    plt.ylabel('Scale Improvement (mm)')
+    plt.title('Average Scale Improvements with Standard Deviation')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f'{project_name}_scale_statistics.png'))
+    plt.close()
+    
+    # 3. Plot example trajectories for each scale
+    for scale in scales:
+        scale_key = f'scale_{scale:.3f}'
+        example_points = scale_records['example_points'][scale_key]
+        
+        if not example_points:
+            continue
         
         plt.figure(figsize=(15, 5))
         
-        # Plot iteration histogram
-        plt.subplot(1,3,1)
-        plt.hist(plot_data['statistics']['convergence_stats']['iterations_histogram'], bins=20)
-        plt.title('Iteration Count Distribution')
-        plt.xlabel('Number of Iterations')
-        plt.ylabel('Count')
-        plt.grid(True)
+        # Plot scale convergence
+        plt.subplot(1, 2, 1)
+        for point in example_points:
+            trajectory = point['trajectory']
+            scales_t = [t['scale'] for t in trajectory]
+            plt.plot(range(len(scales_t)), scales_t, '-o', label=f'Point {point["position"]}')
         
-        # Plot scale changes
-        plt.subplot(1,3,2)
-        plt.hist(plot_data['statistics']['convergence_stats']['scale_changes'], bins=20)
-        plt.title('Scale Changes Distribution')
-        plt.xlabel('Scale Change')
-        plt.ylabel('Count')
-        plt.grid(True)
+        plt.xlabel('Iteration')
+        plt.ylabel('Scale (mm)')
+        plt.title(f'Scale Convergence (Initial Scale: {scale:.3f}mm)')
+        plt.legend()
         
-        # Plot vesselness improvements
-        plt.subplot(1,3,3)
-        plt.hist(plot_data['statistics']['convergence_stats']['vesselness_improvements'], bins=20)
-        plt.title('Vesselness Improvement Distribution')
-        plt.xlabel('Vesselness Improvement')
-        plt.ylabel('Count')
-        plt.grid(True)
+        # Plot vesselness improvement
+        plt.subplot(1, 2, 2)
+        for point in example_points:
+            trajectory = point['trajectory']
+            vesselness_t = [t['vesselness'] for t in trajectory]
+            plt.plot(range(len(vesselness_t)), vesselness_t, '-o', label=f'Point {point["position"]}')
         
-        plt.suptitle('Optimization Statistics Summary')
+        plt.xlabel('Iteration')
+        plt.ylabel('Vesselness')
+        plt.title('Vesselness Improvement')
+        plt.legend()
+        
         plt.tight_layout()
-        
-        # Save summary plot
-        plt.savefig(os.path.join(plots_dir, f'{project_name}_optimization_summary.png'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(plots_dir, f'{project_name}_trajectories_scale_{scale:.3f}.png'))
         plt.close()
-    else:
-        print("No summary statistics available for plotting")
+    
+    # 4. Plot final scale distribution heatmap
+    plt.figure(figsize=(12, 8))
+    
+    # Prepare data for heatmap
+    final_scales = set()
+    for scale_key in scale_records['scale_statistics']['final_scale_distribution']:
+        final_scales.update(float(s) for s in scale_records['scale_statistics']['final_scale_distribution'][scale_key].keys())
+    
+    final_scales = sorted(list(final_scales))
+    initial_scales = scales
+    
+    heatmap_data = np.zeros((len(initial_scales), len(final_scales)))
+    
+    for i, init_scale in enumerate(initial_scales):
+        scale_key = f'scale_{init_scale:.3f}'
+        dist = scale_records['scale_statistics']['final_scale_distribution'][scale_key]
+        
+        for final_scale_str, count in dist.items():
+            j = final_scales.index(float(final_scale_str))
+            heatmap_data[i, j] = count
+    
+    # Normalize rows to show distribution
+    row_sums = heatmap_data.sum(axis=1, keepdims=True)
+    heatmap_data = np.where(row_sums > 0, heatmap_data / row_sums, 0)
+    
+    sns.heatmap(heatmap_data, 
+                xticklabels=[f'{s:.3f}' for s in final_scales],
+                yticklabels=[f'{s:.3f}' for s in initial_scales],
+                cmap='viridis',
+                fmt='.2f')
+    
+    plt.xlabel('Final Scale (mm)')
+    plt.ylabel('Initial Scale (mm)')
+    plt.title('Scale Optimization Distribution')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f'{project_name}_scale_distribution.png'))
+    plt.close()
