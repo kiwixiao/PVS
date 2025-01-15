@@ -218,7 +218,7 @@ def main():
         print("Applying deconvolution...")
         wiener = sitk.WienerDeconvolutionImageFilter()
         wiener.SetNormalize(True)
-        wiener.SetNoise(0.01)  # Changed from SetNoiseLevel to SetNoise
+        wiener.SetVariance(0.01)  # Changed from SetNoise to SetVariance - this is the correct method name
         deconvolved = wiener.Execute(iso_image)
         sitk.WriteImage(deconvolved, deconvolved_path)
         
