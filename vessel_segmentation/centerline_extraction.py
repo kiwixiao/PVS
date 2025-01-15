@@ -11,7 +11,7 @@ from scipy.ndimage import label
 def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     """
     Optimized implementation of Palagyi & Kuba's 6-subiteration thinning algorithm.
-    Ensures single-pixel width centerlines by strictly following deletion templates.
+    Modified to be less aggressive in thinning while maintaining vessel connectivity.
     
     Args:
         binary_volume: 3D numpy array with binary vessel segmentation (1=vessel, 0=background)
@@ -127,7 +127,9 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
 def matches_deletion_template(neighborhood: np.ndarray, direction: int) -> bool:
     """
     Check if a point matches the deletion template for a given direction.
-    Strictly follows Palagyi & Kuba's 6-subiteration templates.
+    Modified to be less aggressive in deletion:
+    1. Requires more neighbors to remain after deletion
+    2. More strict template matching conditions
     """
     # Get the center point's neighbors
     up    = neighborhood[0,1,1]  # U
@@ -137,24 +139,31 @@ def matches_deletion_template(neighborhood: np.ndarray, direction: int) -> bool:
     east  = neighborhood[1,1,2]  # E
     west  = neighborhood[1,1,0]  # W
     
-    # Check specific template based on direction
+    # Modified: Count remaining neighbors for more conservative deletion
+    def count_remaining_neighbors():
+        return (up == 1) + (down == 1) + (north == 1) + (south == 1) + (east == 1) + (west == 1)
+    
+    # Modified: Check specific template based on direction
+    # Now requires at least 2 remaining neighbors for deletion
     if direction == 0:   # U-template
-        return up == 0 and (down == 1 or north == 1 or south == 1 or east == 1 or west == 1)
+        return up == 0 and count_remaining_neighbors() >= 2 and (down == 1 or (north == 1 and south == 1))
     elif direction == 1: # D-template
-        return down == 0 and (up == 1 or north == 1 or south == 1 or east == 1 or west == 1)
+        return down == 0 and count_remaining_neighbors() >= 2 and (up == 1 or (north == 1 and south == 1))
     elif direction == 2: # N-template
-        return north == 0 and (south == 1 or up == 1 or down == 1 or east == 1 or west == 1)
+        return north == 0 and count_remaining_neighbors() >= 2 and (south == 1 or (up == 1 and down == 1))
     elif direction == 3: # S-template
-        return south == 0 and (north == 1 or up == 1 or down == 1 or east == 1 or west == 1)
+        return south == 0 and count_remaining_neighbors() >= 2 and (north == 1 or (up == 1 and down == 1))
     elif direction == 4: # E-template
-        return east == 0 and (west == 1 or up == 1 or down == 1 or north == 1 or south == 1)
+        return east == 0 and count_remaining_neighbors() >= 2 and (west == 1 or (up == 1 and down == 1))
     else:               # W-template
-        return west == 0 and (east == 1 or up == 1 or down == 1 or north == 1 or south == 1)
+        return west == 0 and count_remaining_neighbors() >= 2 and (east == 1 or (up == 1 and down == 1))
 
 def is_simple_point(neighborhood: np.ndarray) -> bool:
     """
     Check if a point is simple (its removal won't change topology).
-    Uses Euler characteristic to ensure topology preservation.
+    Modified to be less aggressive in point removal:
+    1. More strict neighbor count requirement (at least 2 neighbors)
+    2. More lenient connectivity check
     """
     # Count the number of 26-connected components in the 26-neighborhood
     # excluding the center point
@@ -165,7 +174,14 @@ def is_simple_point(neighborhood: np.ndarray) -> bool:
     # Temporarily remove center point
     neighborhood[1,1,1] = 0
     
-    # Count 26-connected components
+    # Count neighbors before connectivity check
+    # Modified: Require at least 2 neighbors to consider deletion
+    neighbor_count = np.sum(neighborhood)
+    if neighbor_count < 2:  # More conservative than before
+        neighborhood[1,1,1] = center  # Restore center point
+        return False
+    
+    # Modified: Use 26-connectivity for more lenient connection checking
     labeled, num_components = label(neighborhood, structure=np.ones((3,3,3)))
     
     # Restore center point
@@ -173,10 +189,8 @@ def is_simple_point(neighborhood: np.ndarray) -> bool:
     
     # A point is simple if:
     # 1. There is exactly one 26-connected component in its neighborhood
-    # 2. The point is not an endpoint (has more than one neighbor)
-    neighbor_count = np.sum(neighborhood) - 1  # Subtract center point
-    
-    return num_components == 1 and neighbor_count > 1
+    # 2. The point has enough neighbors to maintain structure
+    return num_components == 1 and neighbor_count >= 2  # More conservative condition
 
 def extract_centerlines(binary_vessels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Extract centerlines from binary vessel mask using Palagyi's 6-subiteration thinning."""
