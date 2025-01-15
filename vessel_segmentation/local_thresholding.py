@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Set, Tuple, Optional
 import logging
 from tqdm import tqdm
+from scipy.ndimage import label
+import gc
 
 logger = logging.getLogger(__name__)
 
