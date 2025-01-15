@@ -120,11 +120,21 @@ def main():
     if not args.skip_to_threshold:
         # Vessel enhancement using eroded mask
         print("Enhancing vessels...")
-        # Calculate scales from voxel size to 4.5mm (7 scales)
+        # Calculate scales using geometric progression from 0.6mm to 6.0mm (10 scales)
         min_scale = 0.6  # Start at isotropic voxel size
-        max_scale = 4.5  # End at 4.5mm as per paper
-        num_scales = 7
+        max_scale = 6.0  # Maximum scale for detecting larger vessels
+        num_scales = 10
+        
+        # Generate geometric sequence of scales
         scales = np.exp(np.linspace(np.log(min_scale), np.log(max_scale), num_scales))
+        
+        # Calculate approximate vessel diameters detectable at each scale
+        # Using the relationship: vessel_diameter ≈ scale * 2 * sqrt(2)
+        vessel_diameters = scales * 2 * np.sqrt(2)
+        print("\nScale progression and corresponding vessel diameters:")
+        for i, (scale, diameter) in enumerate(zip(scales, vessel_diameters)):
+            print(f"Scale {i+1}: {scale:.2f}mm -> Vessel diameter: {diameter:.2f}mm")
+        print()
         
         vesselness, sigma_max, vessel_direction = calculate_vesselness(
             image_array,
