@@ -4,7 +4,7 @@ import os
 import argparse
 import json
 from vessel_segmentation.preprocessing import resample_to_isotropic, segment_lungs, process_lung_mask, save_intermediate_results
-from vessel_segmentation.vessel_enhancement import calculate_vesselness, save_vesselness_results
+from vessel_segmentation.vessel_enhancement import calculate_vesselness, save_vesselness_results, deconvolve_image
 from vessel_segmentation.thresholding import calculate_adaptive_threshold, save_threshold_results
 from vessel_segmentation.centerline_extraction import extract_centerlines, save_centerline_results
 from vessel_segmentation.local_thresholding import local_optimal_thresholding, save_local_threshold_results
@@ -216,14 +216,14 @@ def main():
         
         # Apply deconvolution on isotropic image
         print("Applying deconvolution...")
-        wiener = sitk.WienerDeconvolutionImageFilter()
-        wiener.SetNormalize(True)
-        wiener.SetVariance(0.01)  # Changed from SetNoise to SetVariance - this is the correct method name
-        deconvolved = wiener.Execute(iso_image)
+        iso_array = sitk.GetArrayFromImage(iso_image)
+        deconvolved_array = deconvolve_image(iso_array, kernel_size=5, sigma=0.6)
+        deconvolved = sitk.GetImageFromArray(deconvolved_array)
+        deconvolved.CopyInformation(iso_image)  # Copy metadata from isotropic image
         sitk.WriteImage(deconvolved, deconvolved_path)
         
         # Convert to numpy array for processing
-        image_array = sitk.GetArrayFromImage(deconvolved)
+        image_array = deconvolved_array
         voxel_spacing = iso_image.GetSpacing()
         
         # Preprocessing

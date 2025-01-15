@@ -3,46 +3,39 @@ import SimpleITK as sitk
 from scipy.ndimage import gaussian_filter
 import os
 import gc
-from scipy import linalg
+from scipy import linalg, fftpack
 
-def deconvolve_image(image_array, mask, output_dir=None):
-    """Apply deconvolution to the image before Hessian calculation
+def deconvolve_image(image_array, kernel_size=5, sigma=0.6):
+    """Deconvolve image using Wiener deconvolution
     
     Args:
         image_array: Input image array
-        mask: Binary mask (eroded mask)
-        output_dir: Directory to save intermediate results
+        kernel_size: Size of Gaussian kernel (default: 5)
+        sigma: Sigma of Gaussian kernel (default: 0.6)
         
     Returns:
         Deconvolved image array
     """
-    # Convert mask to uint8
-    mask = mask.astype(np.uint8)
+    # Create Gaussian PSF
+    x = np.linspace(-(kernel_size//2), kernel_size//2, kernel_size)
+    y = np.linspace(-(kernel_size//2), kernel_size//2, kernel_size)
+    z = np.linspace(-(kernel_size//2), kernel_size//2, kernel_size)
+    X, Y, Z = np.meshgrid(x, y, z)
+    psf = np.exp(-(X**2 + Y**2 + Z**2)/(2*sigma**2))
+    psf = psf / psf.sum()  # Normalize
     
-    # Create SimpleITK image
-    image = sitk.GetImageFromArray(image_array)
+    # Compute FFT of image and PSF
+    image_fft = fftpack.fftn(image_array)
+    psf_fft = fftpack.fftn(psf, image_array.shape)
     
-    # Apply deconvolution using Wiener filter
-    wiener = sitk.WienerDeconvolutionImageFilter()
-    wiener.SetNormalize(True)
-    wiener.SetNoiseLevel(0.01)  # Adjust noise level as needed
+    # Wiener deconvolution with regularization
+    reg_param = 0.1  # Regularization parameter
+    deconv_fft = image_fft * np.conj(psf_fft) / (np.abs(psf_fft)**2 + reg_param)
     
-    # Apply deconvolution only to masked region
-    deconvolved = wiener.Execute(image)
-    deconvolved_array = sitk.GetArrayFromImage(deconvolved)
+    # Inverse FFT
+    deconv = np.real(fftpack.ifftn(deconv_fft))
     
-    # Apply mask
-    deconvolved_array = deconvolved_array * (mask > 0)
-    
-    # Save deconvolved image for debugging if output directory provided
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        sitk.WriteImage(
-            sitk.GetImageFromArray(deconvolved_array),
-            os.path.join(output_dir, 'deconvolved_image_for_hessian.nrrd')
-        )
-    
-    return deconvolved_array
+    return deconv
 
 def calculate_vesselness(image_array, mask, scales, output_dir=None):
     """Calculate vesselness measure using multi-scale Hessian analysis
