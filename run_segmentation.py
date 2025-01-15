@@ -2,6 +2,7 @@ import SimpleITK as sitk
 import numpy as np
 import os
 import argparse
+import json
 from vessel_segmentation.preprocessing import resample_to_isotropic, segment_lungs, process_lung_mask, save_intermediate_results
 from vessel_segmentation.vessel_enhancement import calculate_vesselness, save_vesselness_results
 from vessel_segmentation.thresholding import calculate_adaptive_threshold, save_threshold_results
@@ -69,6 +70,107 @@ def setup_output_dirs(project_name):
     for dir_path in dirs.values():
         os.makedirs(dir_path, exist_ok=True)
     return dirs
+
+def save_centerlines_as_vtk(centerlines, point_types, sigma_max, vessel_direction, output_path):
+    """Save centerlines as VTK polydata with vessel attributes
+    
+    Args:
+        centerlines: Binary centerline mask
+        point_types: Point type labels (1=endpoint, 2=segment, 3=bifurcation)
+        sigma_max: Maximum scale at each point (related to vessel radius)
+        vessel_direction: Vessel direction vectors
+        output_path: Path to save the VTK file
+    """
+    import vtk
+    from vtk.util import numpy_support
+    import numpy as np
+    from scipy.ndimage import label
+    
+    # Get centerline point coordinates
+    points = np.argwhere(centerlines > 0)
+    
+    # Create VTK points
+    vtk_points = vtk.vtkPoints()
+    for point in points:
+        vtk_points.InsertNextPoint(point[2], point[1], point[0])  # Convert to x,y,z order
+        
+    # Create point data arrays
+    num_points = len(points)
+    point_type_array = vtk.vtkIntArray()
+    point_type_array.SetName("PointType")
+    
+    radius_array = vtk.vtkFloatArray()
+    radius_array.SetName("Radius")
+    
+    direction_array = vtk.vtkFloatArray()
+    direction_array.SetName("Direction")
+    direction_array.SetNumberOfComponents(3)
+    
+    # Fill point data
+    for point in points:
+        z, y, x = point
+        point_type_array.InsertNextValue(point_types[z, y, x])
+        radius_array.InsertNextValue(sigma_max[z, y, x] * 2 * np.sqrt(2))  # Convert scale to approximate diameter
+        direction = vessel_direction[z, y, x]
+        direction_array.InsertNextTuple3(direction[0], direction[1], direction[2])
+    
+    # Create polydata
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(vtk_points)
+    
+    # Add point data
+    polydata.GetPointData().AddArray(point_type_array)
+    polydata.GetPointData().AddArray(radius_array)
+    polydata.GetPointData().AddArray(direction_array)
+    
+    # Create lines connecting points
+    lines = vtk.vtkCellArray()
+    
+    # Label connected components to identify separate segments
+    labeled_segments, num_segments = label(centerlines)
+    
+    # Process each segment
+    for segment_id in range(1, num_segments + 1):
+        segment_points = np.argwhere(labeled_segments == segment_id)
+        
+        # Skip single points
+        if len(segment_points) < 2:
+            continue
+            
+        # Find endpoints and bifurcations in this segment
+        special_points = segment_points[
+            np.where(
+                (point_types[segment_points[:,0], segment_points[:,1], segment_points[:,2]] == 1) |
+                (point_types[segment_points[:,0], segment_points[:,1], segment_points[:,2]] == 3)
+            )[0]
+        ]
+        
+        if len(special_points) >= 2:
+            # Create a line from each special point to its closest neighbor
+            for start_point in special_points:
+                # Find closest point that's not the start point
+                other_points = segment_points[~np.all(segment_points == start_point, axis=1)]
+                distances = np.sqrt(np.sum((other_points - start_point)**2, axis=1))
+                closest_idx = np.argmin(distances)
+                end_point = other_points[closest_idx]
+                
+                # Find point indices in the full points array
+                start_idx = np.where(np.all(points == start_point, axis=1))[0][0]
+                end_idx = np.where(np.all(points == end_point, axis=1))[0][0]
+                
+                # Create line
+                line = vtk.vtkLine()
+                line.GetPointIds().SetId(0, start_idx)
+                line.GetPointIds().SetId(1, end_idx)
+                lines.InsertNextCell(line)
+    
+    polydata.SetLines(lines)
+    
+    # Write to file
+    writer = vtk.vtkXMLPolyDataWriter()
+    writer.SetFileName(output_path)
+    writer.SetInputData(polydata)
+    writer.Write()
 
 def main():
     # Parse command line arguments
@@ -198,11 +300,58 @@ def main():
         final_vessels, 
         local_thresholds, 
         output_dirs['final'],
+        point_types,
         parameter_set=args.parameter_set,
         custom_params=args.custom_params
     )
     
+    # Extract refined centerlines from final segmentation
+    print("Extracting refined centerlines from final segmentation...")
+    refined_centerlines, refined_point_types = extract_centerlines(final_vessels)
+    
+    # Save refined centerlines as VTK
+    print("Saving refined centerlines as VTK polydata...")
+    save_centerlines_to_vtk(
+        refined_centerlines,
+        refined_point_types,
+        sigma_max,
+        vessel_direction,
+        output_dirs['final'],
+        suffix='refined'
+    )
+    
+    # Save refined special points information
+    refined_special_points = {
+        'endpoints': np.argwhere(refined_point_types == 1).tolist(),
+        'bifurcations': np.argwhere(refined_point_types == 3).tolist(),
+        'segments': np.argwhere(refined_point_types == 2).tolist()
+    }
+    
+    refined_point_counts = {
+        'num_endpoints': len(refined_special_points['endpoints']),
+        'num_bifurcations': len(refined_special_points['bifurcations']),
+        'num_segment_points': len(refined_special_points['segments'])
+    }
+    
+    # Save comparison between initial and refined centerlines
+    comparison_metadata = {
+        'initial_point_counts': point_counts,
+        'refined_point_counts': refined_point_counts,
+        'changes': {
+            'endpoints_diff': refined_point_counts['num_endpoints'] - point_counts['num_endpoints'],
+            'bifurcations_diff': refined_point_counts['num_bifurcations'] - point_counts['num_bifurcations'],
+            'segments_diff': refined_point_counts['num_segment_points'] - point_counts['num_segment_points']
+        }
+    }
+    
+    with open(os.path.join(output_dirs['final'], 'centerline_comparison.json'), 'w') as f:
+        json.dump(comparison_metadata, f, indent=2)
+    
     print(f"Segmentation complete! Results saved in {output_dirs['base']}")
+    print("\nCenterline comparison:")
+    print(f"Initial endpoints: {point_counts['num_endpoints']} -> Refined: {refined_point_counts['num_endpoints']}")
+    print(f"Initial bifurcations: {point_counts['num_bifurcations']} -> Refined: {refined_point_counts['num_bifurcations']}")
+    print(f"Initial segments: {point_counts['num_segment_points']} -> Refined: {refined_point_counts['num_segment_points']}")
 
 if __name__ == "__main__":
     main()
