@@ -1,0 +1,23 @@
+name: pvs
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - scikit-image
+  - scikit-learn
+  - pandas
+  - tqdm
+  - ipykernel
+  - pip:
+    - simpleitk==2.3.1
+    - nibabel>=5.2.1
+    - lungmask==0.2.20
+    - opencv-python
+    - pydicom>=3.0.1
+    - pyvista>=0.44.1
+    - vtk>=9.3.1
