@@ -23,11 +23,10 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
     sigma_max = np.zeros_like(image_array)
     vessel_direction = np.zeros((*image_array.shape, 3))
     
-    # Initialize scale optimization records with enhanced visualization data
+    # Initialize scale optimization records with minimal data
     scale_records = {
         'metadata': {
             'initial_scales': scales.tolist(),
-            'kernel_size': 5,
             'optimization_params': {
                 'base_lr': 0.1,
                 'momentum': 0.9,
@@ -35,22 +34,18 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                 'convergence_threshold': 1e-4
             }
         },
-        'optimizations': [],
         'statistics': {
             'total_points_optimized': 0,
-            'average_improvement': 0.0,
             'average_iterations': 0.0,
+            'scale_distribution': {},
             'convergence_stats': {
-                'iterations_histogram': [],  # Will store iteration counts
-                'scale_changes': [],        # Will store final scale changes
-                'vesselness_improvements': [] # Will store vesselness improvements
-            },
-            'scale_distribution': {}
+                'iterations_histogram': [],
+                'scale_changes': [],
+                'vesselness_improvements': []
+            }
         },
         'visualization_data': {
-            'convergence_plots': [],  # Will store data for selected points
-            'learning_rate_plots': [], # Will store learning rate adaptation
-            'scale_trajectory_plots': [] # Will store scale changes
+            'example_points': []  # Will store only 5 representative points
         }
     }
     
@@ -136,13 +131,20 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                 # Add the record to the list before updating it
                 scale_records['optimizations'].append(optimization_record)
                 
-                # Store first few optimizations for visualization
-                if len(scale_records['visualization_data']['convergence_plots']) < 10:
-                    scale_records['visualization_data']['convergence_plots'].append({
+                # Store only 5 representative points for visualization
+                if len(scale_records['visualization_data']['example_points']) < 5:
+                    example_point = {
                         'position': [int(z), int(y), int(x)],
-                        'scale': float(scale),
-                        'convergence_data': optimization_record['convergence_data']
-                    })
+                        'initial_scale': float(scale),
+                        'optimal_scale': float(optimal_scale),
+                        'improvement': float(optimal_scale - scale),
+                        'iterations': len(trajectory),
+                        'convergence': {
+                            'scales': [float(t['scale']) for t in trajectory],
+                            'vesselness': [float(t['vesselness']) for t in trajectory]
+                        }
+                    }
+                    scale_records['visualization_data']['example_points'].append(example_point)
                 
                 # Recalculate vesselness at optimal scale
                 hessian_opt = calculate_hessian_at_point(image_array, optimal_scale, (z,y,x))
@@ -573,83 +575,79 @@ def plot_convergence_data(plot_data, output_dir, project_name):
         output_dir: Directory to save plots
         project_name: Name of the project for file naming
     """
+    # Check if plot data contains required fields
+    if not plot_data or 'statistics' not in plot_data:
+        print("No convergence data available for plotting")
+        return
+        
     # Create plots directory if it doesn't exist
     plots_dir = os.path.join(output_dir, 'optimization_plots')
     os.makedirs(plots_dir, exist_ok=True)
     
-    # Plot convergence for example points
-    for idx, plot in enumerate(plot_data['convergence_plots']):
-        plt.figure(figsize=(15, 10))
+    # Plot convergence for example points if available
+    if 'visualization_data' in plot_data and 'example_points' in plot_data['visualization_data']:
+        for idx, plot in enumerate(plot_data['visualization_data']['example_points']):
+            plt.figure(figsize=(15, 10))
+            
+            # Plot scale convergence
+            plt.subplot(2,2,1)
+            plt.plot(plot['convergence']['scales'], '-o')
+            plt.title(f'Scale Convergence\nPosition: {plot["position"]}')
+            plt.xlabel('Iteration')
+            plt.ylabel('Scale')
+            plt.grid(True)
+            
+            # Plot vesselness improvement
+            plt.subplot(2,2,2)
+            plt.plot(plot['convergence']['vesselness'], '-o')
+            plt.title('Vesselness Improvement')
+            plt.xlabel('Iteration')
+            plt.ylabel('Vesselness')
+            plt.grid(True)
+            
+            plt.suptitle(f'Scale Optimization Convergence - Point {idx+1}\nInitial Scale: {plot["initial_scale"]:.3f}')
+            plt.tight_layout()
+            
+            # Save plot
+            plt.savefig(os.path.join(plots_dir, f'{project_name}_convergence_point_{idx+1}.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+    
+    # Create summary statistics plots if available
+    if ('statistics' in plot_data and 
+        'convergence_stats' in plot_data['statistics'] and 
+        len(plot_data['statistics']['convergence_stats']['iterations_histogram']) > 0):
         
-        # Plot scale convergence
-        plt.subplot(2,2,1)
-        plt.plot(plot['convergence_data']['scales'], '-o')
-        plt.title(f'Scale Convergence\nPosition: {plot["position"]}')
-        plt.xlabel('Iteration')
-        plt.ylabel('Scale')
+        plt.figure(figsize=(15, 5))
+        
+        # Plot iteration histogram
+        plt.subplot(1,3,1)
+        plt.hist(plot_data['statistics']['convergence_stats']['iterations_histogram'], bins=20)
+        plt.title('Iteration Count Distribution')
+        plt.xlabel('Number of Iterations')
+        plt.ylabel('Count')
         plt.grid(True)
         
-        # Plot learning rate adaptation
-        plt.subplot(2,2,2)
-        plt.plot(plot['convergence_data']['learning_rates'], '-o')
-        plt.title('Learning Rate Adaptation')
-        plt.xlabel('Iteration')
-        plt.ylabel('Learning Rate')
+        # Plot scale changes
+        plt.subplot(1,3,2)
+        plt.hist(plot_data['statistics']['convergence_stats']['scale_changes'], bins=20)
+        plt.title('Scale Changes Distribution')
+        plt.xlabel('Scale Change')
+        plt.ylabel('Count')
         plt.grid(True)
         
-        # Plot vesselness improvement
-        plt.subplot(2,2,3)
-        plt.plot(plot['convergence_data']['vesselness'], '-o')
-        plt.title('Vesselness Improvement')
-        plt.xlabel('Iteration')
-        plt.ylabel('Vesselness')
+        # Plot vesselness improvements
+        plt.subplot(1,3,3)
+        plt.hist(plot_data['statistics']['convergence_stats']['vesselness_improvements'], bins=20)
+        plt.title('Vesselness Improvement Distribution')
+        plt.xlabel('Vesselness Improvement')
+        plt.ylabel('Count')
         plt.grid(True)
         
-        # Plot gradient magnitude
-        plt.subplot(2,2,4)
-        plt.plot([abs(g) if g is not None else 0 for g in plot['convergence_data']['gradients']], '-o')
-        plt.title('Gradient Magnitude')
-        plt.xlabel('Iteration')
-        plt.ylabel('|Gradient|')
-        plt.grid(True)
-        
-        plt.suptitle(f'Scale Optimization Convergence - Point {idx+1}\nInitial Scale: {plot["scale"]:.3f}')
+        plt.suptitle('Optimization Statistics Summary')
         plt.tight_layout()
         
-        # Save plot
-        plt.savefig(os.path.join(plots_dir, f'{project_name}_convergence_point_{idx+1}.png'), dpi=300, bbox_inches='tight')
+        # Save summary plot
+        plt.savefig(os.path.join(plots_dir, f'{project_name}_optimization_summary.png'), dpi=300, bbox_inches='tight')
         plt.close()
-    
-    # Create summary statistics plots
-    plt.figure(figsize=(15, 5))
-    
-    # Plot iteration histogram
-    plt.subplot(1,3,1)
-    plt.hist(plot_data['statistics']['convergence_stats']['iterations_histogram'], bins=20)
-    plt.title('Iteration Count Distribution')
-    plt.xlabel('Number of Iterations')
-    plt.ylabel('Count')
-    plt.grid(True)
-    
-    # Plot scale changes
-    plt.subplot(1,3,2)
-    plt.hist(plot_data['statistics']['convergence_stats']['scale_changes'], bins=20)
-    plt.title('Scale Changes Distribution')
-    plt.xlabel('Scale Change')
-    plt.ylabel('Count')
-    plt.grid(True)
-    
-    # Plot vesselness improvements
-    plt.subplot(1,3,3)
-    plt.hist(plot_data['statistics']['convergence_stats']['vesselness_improvements'], bins=20)
-    plt.title('Vesselness Improvement Distribution')
-    plt.xlabel('Vesselness Improvement')
-    plt.ylabel('Count')
-    plt.grid(True)
-    
-    plt.suptitle('Optimization Statistics Summary')
-    plt.tight_layout()
-    
-    # Save summary plot
-    plt.savefig(os.path.join(plots_dir, f'{project_name}_optimization_summary.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+    else:
+        print("No summary statistics available for plotting")
