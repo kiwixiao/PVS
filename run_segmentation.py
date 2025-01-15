@@ -251,13 +251,20 @@ def main():
             print(f"Scale {i+1}: {scale:.2f}mm -> Vessel diameter: {diameter:.2f}mm")
         print()
         
-        vesselness, sigma_max, vessel_direction = calculate_vesselness(
+        # Calculate vesselness using eroded mask
+        vesselness, sigma_max, vessel_direction, filtered_vesselness = calculate_vesselness(
             image_array,
             eroded_mask,
             scales,
             output_dirs['intermediate']
         )
         save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dirs['intermediate'])
+        
+        # Save filtered vesselness separately
+        sitk.WriteImage(
+            sitk.GetImageFromArray(filtered_vesselness),
+            os.path.join(output_dirs['intermediate'], 'filtered_vesselness.nrrd')
+        )
     else:
         # Load pre-computed vesselness results
         print("Loading pre-computed vesselness results...")
@@ -302,6 +309,14 @@ def main():
         vessel_direction,
         parameter_set=args.parameter_set
     )
+    
+    # Filter disconnected components from final vessels
+    print("\nFiltering disconnected components from final segmentation...")
+    filtered_vessels = filter_disconnected_components(final_vessels, 
+                                                    min_component_size=50,
+                                                    connectivity=26)
+    
+    # Save both original and filtered results
     save_local_threshold_results(
         final_vessels, 
         local_thresholds, 
@@ -311,9 +326,26 @@ def main():
         custom_params=args.custom_params
     )
     
-    # Extract refined centerlines from final segmentation
-    print("Extracting refined centerlines from final segmentation...")
-    refined_centerlines, refined_point_types = extract_centerlines(final_vessels)
+    # Save filtered vessels separately
+    sitk.WriteImage(
+        sitk.GetImageFromArray(filtered_vessels.astype(np.uint8)),
+        os.path.join(output_dirs['final'], 'filtered_final_vessels.nrrd')
+    )
+    
+    # Extract refined centerlines from filtered segmentation
+    print("Extracting refined centerlines from filtered segmentation...")
+    refined_centerlines, refined_point_types = extract_centerlines(filtered_vessels)
+    
+    # Save refined centerlines as NRRD files
+    print("Saving refined centerlines as NRRD files...")
+    sitk.WriteImage(
+        sitk.GetImageFromArray(refined_centerlines.astype(np.uint8)),
+        os.path.join(output_dirs['final'], 'refined_centerlines.nrrd')
+    )
+    sitk.WriteImage(
+        sitk.GetImageFromArray(refined_point_types),
+        os.path.join(output_dirs['final'], 'refined_centerline_point_types.nrrd')
+    )
     
     # Save refined centerlines as VTK
     print("Saving refined centerlines as VTK polydata...")

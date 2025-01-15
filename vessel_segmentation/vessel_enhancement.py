@@ -45,6 +45,11 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
         mask: Binary mask (eroded mask)
         scales: List of scales for Hessian calculation
         output_dir: Directory to save intermediate results
+        
+    Returns:
+        vesselness: Original vesselness measure
+        sigma_max: Scale of maximum response
+        vessel_direction: Vessel direction vectors
     """
     # Convert mask to uint8 (this should be the eroded mask)
     mask = mask.astype(np.uint8)
@@ -345,3 +350,72 @@ def frangi_vesselness(eigenvalues, image_array):
     vesselness[valid_indices] = (1 - exp_Ra) * exp_Rb * (1 - exp_S)
     
     return vesselness
+
+def filter_disconnected_components(binary_mask, min_component_size=50, connectivity=26):
+    """Filter out small disconnected components from binary vessel mask.
+    
+    Args:
+        binary_mask: Binary vessel mask
+        min_component_size: Minimum size (in voxels) for a component to be kept
+        connectivity: Connectivity for component labeling (6, 18, or 26)
+        
+    Returns:
+        Filtered binary mask with small components removed
+    """
+    from scipy.ndimage import label, sum as label_sum
+    
+    # Label connected components
+    structure = None
+    if connectivity == 6:
+        structure = np.array([[[0,0,0],
+                             [0,1,0],
+                             [0,0,0]],
+                            [[0,1,0],
+                             [1,1,1],
+                             [0,1,0]],
+                            [[0,0,0],
+                             [0,1,0],
+                             [0,0,0]]])
+    elif connectivity == 18:
+        structure = np.array([[[0,1,0],
+                             [1,1,1],
+                             [0,1,0]],
+                            [[1,1,1],
+                             [1,1,1],
+                             [1,1,1]],
+                            [[0,1,0],
+                             [1,1,1],
+                             [0,1,0]]])
+    elif connectivity == 26:
+        structure = np.ones((3,3,3))
+    else:
+        raise ValueError("Connectivity must be 6, 18, or 26")
+    
+    # Label components
+    labeled_array, num_features = label(binary_mask, structure=structure)
+    
+    if num_features == 0:
+        return binary_mask
+    
+    # Calculate component sizes
+    component_sizes = label_sum(np.ones_like(binary_mask), labeled_array, 
+                              range(1, num_features + 1))
+    
+    print(f"Found {num_features} connected components")
+    print(f"Component size range: {np.min(component_sizes)} to {np.max(component_sizes)} voxels")
+    print(f"Number of components smaller than {min_component_size} voxels: "
+          f"{np.sum(component_sizes < min_component_size)}")
+    
+    # Create mask of components to keep
+    keep_components = np.zeros_like(labeled_array)
+    for i, size in enumerate(component_sizes, start=1):
+        if size >= min_component_size:
+            keep_components[labeled_array == i] = 1
+    
+    # Calculate statistics
+    removed_volume = np.sum(binary_mask) - np.sum(keep_components)
+    removed_percentage = (removed_volume / np.sum(binary_mask)) * 100
+    
+    print(f"Removed {removed_volume} voxels ({removed_percentage:.2f}% of original volume)")
+    
+    return keep_components.astype(binary_mask.dtype)
