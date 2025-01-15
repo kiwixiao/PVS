@@ -312,8 +312,16 @@ def extract_centerlines(binary_vessels: np.ndarray) -> Tuple[np.ndarray, np.ndar
     
     return centerlines, point_types
 
-def save_centerline_results(centerlines, point_types, output_dir):
-    """Save centerline extraction results in both NRRD and VTK formats"""
+def save_centerline_results(centerlines, point_types, output_dir, sigma_max=None, vessel_directions=None):
+    """Save centerline extraction results in both NRRD and VTK formats with enhanced visualization
+    
+    Args:
+        centerlines: Binary centerline mask
+        point_types: Point type labels (1=endpoint, 2=segment, 3=bifurcation)
+        output_dir: Directory to save results
+        sigma_max: Maximum scale at each point (for radius visualization)
+        vessel_directions: Vessel direction vectors
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     # Save NRRD files
@@ -326,21 +334,42 @@ def save_centerline_results(centerlines, point_types, output_dir):
         os.path.join(output_dir, 'centerline_point_types.nrrd')
     )
     
-    # Convert to VTK PolyData
+    # Create enhanced VTK visualization
     points = vtk.vtkPoints()
     lines = vtk.vtkCellArray()
-    point_data = vtk.vtkIntArray()
-    point_data.SetName("PointType")
+    
+    # Point data arrays
+    point_type_data = vtk.vtkIntArray()
+    point_type_data.SetName("PointType")
+    
+    radius_data = vtk.vtkFloatArray()
+    radius_data.SetName("Radius")
+    
+    # Direction vectors (if available)
+    direction_vectors = vtk.vtkFloatArray()
+    direction_vectors.SetName("Direction")
+    direction_vectors.SetNumberOfComponents(3)
     
     # Get centerline points
     z, y, x = np.where(centerlines > 0)
     point_id = 0
     point_id_map = {}
     
-    # Add points and their types
+    # Add points and their attributes
     for i in range(len(z)):
         points.InsertNextPoint(x[i], y[i], z[i])
-        point_data.InsertNextValue(point_types[z[i], y[i], x[i]])
+        point_type_data.InsertNextValue(point_types[z[i], y[i], x[i]])
+        
+        # Add radius if available
+        if sigma_max is not None:
+            radius = sigma_max[z[i], y[i], x[i]]
+            radius_data.InsertNextValue(radius)
+        
+        # Add direction if available
+        if vessel_directions is not None:
+            direction = vessel_directions[z[i], y[i], x[i]]
+            direction_vectors.InsertNextTuple3(direction[0], direction[1], direction[2])
+        
         point_id_map[(z[i], y[i], x[i])] = point_id
         point_id += 1
     
@@ -368,18 +397,28 @@ def save_centerline_results(centerlines, point_types, output_dir):
     polydata = vtk.vtkPolyData()
     polydata.SetPoints(points)
     polydata.SetLines(lines)
-    polydata.GetPointData().AddArray(point_data)
     
-    # Save as VTK file
-    writer = vtk.vtkPolyDataWriter()
-    writer.SetFileName(os.path.join(output_dir, 'centerlines.vtk'))
+    # Add point data
+    polydata.GetPointData().AddArray(point_type_data)
+    if sigma_max is not None:
+        polydata.GetPointData().AddArray(radius_data)
+    if vessel_directions is not None:
+        polydata.GetPointData().AddArray(direction_vectors)
+    
+    # Save as VTP file (XML PolyData format)
+    writer = vtk.vtkXMLPolyDataWriter()
+    writer.SetFileName(os.path.join(output_dir, 'centerlines.vtp'))
     writer.SetInputData(polydata)
     writer.Write()
     
     print("\nSaved centerline results:")
     print(f"- NRRD files: centerlines.nrrd, centerline_point_types.nrrd")
-    print(f"- VTK file: centerlines.vtk")
+    print(f"- VTK file: centerlines.vtp")
     print("\nPoint type legend:")
-    print("1: Endpoint")
-    print("2: Segment point")
-    print("3: Bifurcation point")
+    print("1: Endpoint (Red)")
+    print("2: Segment point (Blue)")
+    print("3: Bifurcation point (Yellow)")
+    print("\nVisualization attributes:")
+    print("- Point size: Proportional to vessel radius (if sigma_max provided)")
+    print("- Direction vectors: Shown as glyphs (if vessel_directions provided)")
+    print("- Color: Based on point type")

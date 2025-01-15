@@ -250,7 +250,13 @@ def main():
     else:
         print("Extracting centerlines...")
         centerlines, point_types = extract_centerlines(binary_vessels)
-        save_centerline_results(centerlines, point_types, output_dirs['intermediate'])
+        save_centerline_results(
+            centerlines, 
+            point_types, 
+            output_dirs['intermediate'],
+            sigma_max=vesselness_results['sigma_max'],
+            vessel_directions=vesselness_results['vessel_direction']
+        )
     
     # Local thresholding
     print("Applying local optimal thresholding...")

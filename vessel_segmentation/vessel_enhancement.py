@@ -46,7 +46,8 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
         },
         'visualization_data': {
             'example_points': []  # Will store only 5 representative points
-        }
+        },
+        'optimizations': []  # Initialize empty list for optimization records
     }
     
     # Process each scale
