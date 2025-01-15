@@ -5,26 +5,56 @@ import os
 import gc
 from scipy import linalg
 
+def deconvolve_image(image_array, mask, output_dir=None):
+    """Apply deconvolution to the image before Hessian calculation
+    
+    Args:
+        image_array: Input image array
+        mask: Binary mask (eroded mask)
+        output_dir: Directory to save intermediate results
+        
+    Returns:
+        Deconvolved image array
+    """
+    # Convert mask to uint8
+    mask = mask.astype(np.uint8)
+    
+    # Create SimpleITK image
+    image = sitk.GetImageFromArray(image_array)
+    
+    # Apply deconvolution using Wiener filter
+    wiener = sitk.WienerDeconvolutionImageFilter()
+    wiener.SetNormalize(True)
+    wiener.SetNoiseLevel(0.01)  # Adjust noise level as needed
+    
+    # Apply deconvolution only to masked region
+    deconvolved = wiener.Execute(image)
+    deconvolved_array = sitk.GetArrayFromImage(deconvolved)
+    
+    # Apply mask
+    deconvolved_array = deconvolved_array * (mask > 0)
+    
+    # Save deconvolved image for debugging if output directory provided
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        sitk.WriteImage(
+            sitk.GetImageFromArray(deconvolved_array),
+            os.path.join(output_dir, 'deconvolved_image_for_hessian.nrrd')
+        )
+    
+    return deconvolved_array
+
 def calculate_vesselness(image_array, mask, scales, output_dir=None):
     """Calculate vesselness measure using multi-scale Hessian analysis
     
     Args:
-        image_array: Input image array
+        image_array: Input image array (should be deconvolved)
         mask: Binary mask (eroded mask)
         scales: List of scales for Hessian calculation
         output_dir: Directory to save intermediate results
     """
     # Convert mask to uint8 (this should be the eroded mask)
     mask = mask.astype(np.uint8)
-    
-    # Save masked image for debugging (only once at the beginning)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        masked_image = image_array * (mask > 0)
-        sitk.WriteImage(
-            sitk.GetImageFromArray(masked_image),
-            os.path.join(output_dir, 'masked_image_for_hessian.nrrd')
-        )
     
     # Always try to load pre-computed results first if output directory is provided
     if output_dir:
@@ -70,18 +100,14 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None):
         hessian = calculate_hessian(image_array, scale)
         
         # Calculate eigenvalues and eigenvectors
-        # Note: eigenvalues are sorted by magnitude |λ1| ≤ |λ2| ≤ |λ3|
-        # The vessel direction is the eigenvector corresponding to λ1 (smallest magnitude)
         eigenvalues, eigenvectors = calculate_eigenvalues(hessian, mask)
         
         # Calculate vesselness for this scale
         current_vesselness = frangi_vesselness(eigenvalues, image_array)
         current_vesselness *= scale  # γ-normalization
         
-        # Get vessel direction (eigenvector corresponding to smallest eigenvalue λ1)
-        # This eigenvector points along the vessel direction because λ1 corresponds
-        # to the direction of least intensity variation
-        current_direction = eigenvectors[0]  # First eigenvector (corresponding to λ1)
+        # Get vessel direction
+        current_direction = eigenvectors[0]
         
         # Update vesselness, sigma_max, and direction only within the mask where response is higher
         update_mask = (current_vesselness > vesselness) & (mask > 0)

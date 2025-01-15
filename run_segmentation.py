@@ -182,10 +182,11 @@ def main():
     # Check if isotropic image and eroded mask exist
     iso_image_path = os.path.join(output_dirs['intermediate'], 'isotropic_image.nrrd')
     eroded_mask_path = os.path.join(output_dirs['intermediate'], 'eroded_mask.nrrd')
+    deconvolved_path = os.path.join(output_dirs['intermediate'], 'deconvolved_image_for_hessian.nrrd')
     
-    if os.path.exists(iso_image_path) and os.path.exists(eroded_mask_path):
-        print("Found isotropic image and eroded mask, skipping preprocessing steps...")
-        image_array = sitk.GetArrayFromImage(sitk.ReadImage(iso_image_path))
+    if os.path.exists(iso_image_path) and os.path.exists(eroded_mask_path) and os.path.exists(deconvolved_path):
+        print("Found deconvolved image and eroded mask, skipping preprocessing steps...")
+        image_array = sitk.GetArrayFromImage(sitk.ReadImage(deconvolved_path))
         eroded_mask = sitk.GetArrayFromImage(sitk.ReadImage(eroded_mask_path))
         voxel_spacing = (0.6, 0.6, 0.6)  # Since we always resample to 0.6mm isotropic
     else:
@@ -194,6 +195,8 @@ def main():
             missing_files.append('isotropic_image.nrrd')
         if not os.path.exists(eroded_mask_path):
             missing_files.append('eroded_mask.nrrd')
+        if not os.path.exists(deconvolved_path):
+            missing_files.append('deconvolved_image_for_hessian.nrrd')
         print(f"Missing files: {', '.join(missing_files)}, running preprocessing steps...")
         
         # Load input image
@@ -211,25 +214,28 @@ def main():
         # Save isotropic image
         sitk.WriteImage(iso_image, iso_image_path)
         
+        # Apply deconvolution on isotropic image
+        print("Applying deconvolution...")
+        wiener = sitk.WienerDeconvolutionImageFilter()
+        wiener.SetNormalize(True)
+        wiener.SetNoiseLevel(0.01)  # Adjust noise level as needed
+        deconvolved = wiener.Execute(iso_image)
+        sitk.WriteImage(deconvolved, deconvolved_path)
+        
         # Convert to numpy array for processing
-        image_array = sitk.GetArrayFromImage(iso_image)
+        image_array = sitk.GetArrayFromImage(deconvolved)
         voxel_spacing = iso_image.GetSpacing()
         
         # Preprocessing
         print("Segmenting lungs...")
-        lung_mask = segment_lungs(iso_image)  # Pass isotropic image
+        lung_mask = segment_lungs(iso_image)  # Pass isotropic image for segmentation
         preprocess_results = process_lung_mask(lung_mask, voxel_spacing)
         save_intermediate_results(preprocess_results, output_dirs['intermediate'])
         eroded_mask = preprocess_results['eroded_mask']
-        
-        # Save masked image for future use
-        masked_image = image_array * eroded_mask
-        sitk.WriteImage(sitk.GetImageFromArray(masked_image), 
-                       os.path.join(output_dirs['intermediate'], 'masked_image_for_hessian.nrrd'))
     
     if not args.skip_to_threshold:
         # Vessel enhancement using eroded mask
-        print("Enhancing vessels...")
+        print("Computing Hessian and vesselness...")
         # Calculate scales using geometric progression from 0.6mm to 6.0mm (10 scales)
         min_scale = 0.6  # Start at isotropic voxel size
         max_scale = 6.0  # Maximum scale for detecting larger vessels
