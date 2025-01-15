@@ -6,6 +6,7 @@ import gc
 from scipy import fftpack
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from scipy import linalg
 
 def calculate_vesselness(image_array, mask, scales, output_dir=None, project_name=None):
     """Calculate vesselness measure using Frangi's method with scale optimization.
@@ -213,53 +214,49 @@ def calculate_hessian(image_array, scale):
         image_array: Input image array
         scale: Scale (sigma) for Gaussian kernel
     """
+    import SimpleITK as sitk
+    import numpy as np
     from tqdm import tqdm
     import gc
     
-    # Create discrete Gaussian kernel with size 5
-    kernel_size = 5
-    x = np.linspace(-(kernel_size//2), kernel_size//2, kernel_size)
-    y = np.linspace(-(kernel_size//2), kernel_size//2, kernel_size)
-    z = np.linspace(-(kernel_size//2), kernel_size//2, kernel_size)
-    X, Y, Z = np.meshgrid(x, y, z)
-    
-    # Create Gaussian kernel
-    gaussian = np.exp(-(X**2 + Y**2 + Z**2)/(2*scale**2))
-    gaussian = gaussian / gaussian.sum()  # Normalize
-    
-    # Create first and second derivative kernels
-    dg_dx = -X/(scale**2) * gaussian
-    dg_dy = -Y/(scale**2) * gaussian
-    dg_dz = -Z/(scale**2) * gaussian
-    
-    dg_dxx = (X**2/(scale**4) - 1/(scale**2)) * gaussian
-    dg_dyy = (Y**2/(scale**4) - 1/(scale**2)) * gaussian
-    dg_dzz = (Z**2/(scale**4) - 1/(scale**2)) * gaussian
-    
-    dg_dxy = (X*Y/(scale**4)) * gaussian
-    dg_dxz = (X*Z/(scale**4)) * gaussian
-    dg_dyz = (Y*Z/(scale**4)) * gaussian
-    
-    # Initialize Hessian components
+    # Initialize Hessian components dictionary
     hessian = {}
     
-    # Create progress bar for derivative calculations
-    derivative_pairs = [
-        ('dxx', dg_dxx), ('dxy', dg_dxy), ('dxz', dg_dxz),
-        ('dyy', dg_dyy), ('dyz', dg_dyz), ('dzz', dg_dzz)
-    ]
+    # Pre-create Gaussian filters for orders 1 and 2
+    gaussian1 = sitk.RecursiveGaussianImageFilter()
+    gaussian1.SetSigma(scale)
+    gaussian1.SetOrder(1)
     
-    from scipy.ndimage import convolve
+    gaussian2 = sitk.RecursiveGaussianImageFilter()
+    gaussian2.SetSigma(scale)
+    gaussian2.SetOrder(2)
     
-    for name, kernel in tqdm(derivative_pairs, desc=f"Computing Hessian at scale {scale:.2f}", leave=False):
-        # Convolve with appropriate kernel
-        hessian[name] = convolve(image_array, kernel, mode='reflect')
+    # Convert numpy array to SimpleITK image
+    image = sitk.GetImageFromArray(image_array)
+    
+    # Process second derivatives first (diagonal elements)
+    for i, name in enumerate([('dxx', 0), ('dyy', 1), ('dzz', 2)]):
+        gaussian2.SetDirection(name[1])
+        result = gaussian2.Execute(image)
+        hessian[name[0]] = sitk.GetArrayFromImage(result)
+        gc.collect()
+    
+    # Process mixed derivatives
+    for i, j, name in [((0,1), 'dxy'), ((0,2), 'dxz'), ((1,2), 'dyz')]:
+        gaussian1.SetDirection(i)
+        temp = gaussian1.Execute(image)
+        gaussian1.SetDirection(j)
+        result = gaussian1.Execute(temp)
+        hessian[name] = sitk.GetArrayFromImage(result)
+        del temp
         gc.collect()
     
     return hessian
 
 def calculate_eigenvalues(hessian, mask):
     """Calculate eigenvalues and eigenvectors of Hessian matrix within ROI"""
+    import numpy as np
+    from scipy import linalg
     from tqdm import tqdm
     import gc
     
@@ -270,33 +267,50 @@ def calculate_eigenvalues(hessian, mask):
     
     # Get ROI indices
     roi_indices = np.where(mask > 0)
-    
-    # Process only ROI voxels
     total_voxels = len(roi_indices[0])
-    with tqdm(total=total_voxels, desc="Computing eigenvalues", leave=False) as pbar:
-        for i in range(total_voxels):
-            z, y, x = roi_indices[0][i], roi_indices[1][i], roi_indices[2][i]
-            
-            # Construct Hessian matrix at this voxel
-            H = np.array([
-                [hessian['dxx'][z,y,x], hessian['dxy'][z,y,x], hessian['dxz'][z,y,x]],
-                [hessian['dxy'][z,y,x], hessian['dyy'][z,y,x], hessian['dyz'][z,y,x]],
-                [hessian['dxz'][z,y,x], hessian['dyz'][z,y,x], hessian['dzz'][z,y,x]]
-            ])
-            
-            # Compute eigenvalues and eigenvectors
-            w, v = np.linalg.eigh(H)
-            
-            # Sort by absolute eigenvalue
-            idx = np.argsort(np.abs(w))
-            eigenvalues[:,z,y,x] = w[idx]
-            eigenvectors[:,z,y,x] = v[:,idx]
-            
-            pbar.update(1)
-            
-            # Garbage collection periodically
-            if i % 1000 == 0:
-                gc.collect()
+    
+    # Process ROI voxels in batches
+    batch_size = 10000
+    for start_idx in tqdm(range(0, total_voxels, batch_size), desc="Computing eigenvalues", leave=False):
+        end_idx = min(start_idx + batch_size, total_voxels)
+        batch_size_actual = end_idx - start_idx
+        
+        # Get batch indices
+        z = roi_indices[0][start_idx:end_idx]
+        y = roi_indices[1][start_idx:end_idx]
+        x = roi_indices[2][start_idx:end_idx]
+        
+        # Construct batch of Hessian matrices (batch_size x 3 x 3)
+        batch_H = np.zeros((batch_size_actual, 3, 3))
+        batch_H[:,0,0] = hessian['dxx'][z,y,x]
+        batch_H[:,0,1] = batch_H[:,1,0] = hessian['dxy'][z,y,x]
+        batch_H[:,0,2] = batch_H[:,2,0] = hessian['dxz'][z,y,x]
+        batch_H[:,1,1] = hessian['dyy'][z,y,x]
+        batch_H[:,1,2] = batch_H[:,2,1] = hessian['dyz'][z,y,x]
+        batch_H[:,2,2] = hessian['dzz'][z,y,x]
+        
+        # Compute eigenvalues and eigenvectors for the batch
+        w_batch = np.zeros((batch_size_actual, 3))
+        v_batch = np.zeros((batch_size_actual, 3, 3))
+        
+        for i in range(batch_size_actual):
+            try:
+                w, v = linalg.eigh(batch_H[i])
+                # Sort by absolute value
+                idx = np.argsort(np.abs(w))
+                w_batch[i] = w[idx]
+                v_batch[i] = v[:,idx]
+            except Exception as e:
+                print(f"Error computing eigenvalues for matrix:")
+                print(batch_H[i])
+                raise e
+        
+        # Store results
+        eigenvalues[:,z,y,x] = w_batch.T
+        eigenvectors[:,z,y,x] = v_batch.transpose(1,0,2)
+        
+        # Clean up
+        gc.collect()
     
     return eigenvalues, eigenvectors
 

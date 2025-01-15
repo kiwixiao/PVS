@@ -24,6 +24,28 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     # Pad volume to handle border cases
     padded = np.pad(binary_volume, pad_width=1, mode='constant', constant_values=0)
     
+    # Pre-compute valid region mask (exclude padding)
+    valid_mask = np.zeros_like(padded, dtype=bool)
+    valid_mask[1:-1, 1:-1, 1:-1] = True
+    
+    # Pre-compute neighbor offset arrays for each direction
+    direction_checks = {
+        0: [(0,0,1)],  # U
+        1: [(0,0,-1)], # D
+        2: [(0,1,0)],  # N
+        3: [(0,-1,0)], # S
+        4: [(1,0,0)],  # E
+        5: [(-1,0,0)]  # W
+    }
+    
+    # Convert direction templates to numpy arrays for efficiency
+    direction_templates = {}
+    for direction in range(6):
+        template = np.ones((3,3,3), dtype=bool)
+        for dz, dy, dx in direction_checks[direction]:
+            template[1+dz,1+dy,1+dx] = False
+        direction_templates[direction] = template
+    
     # Continue until no points can be deleted
     iteration = 0
     with tqdm(desc="Thinning iterations", leave=False) as pbar:
@@ -31,48 +53,49 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
             changed = False
             # Apply 6 subiterations in order (U,D,N,S,E,W)
             for direction in range(6):
+                # Get border points more efficiently
+                border_points = []
+                for dz, dy, dx in direction_checks[direction]:
+                    shifted = np.roll(padded == 0, (dz,dy,dx), axis=(0,1,2))
+                    border_mask = (padded == 1) & shifted & valid_mask
+                    if np.any(border_mask):
+                        border_points.extend(zip(*np.where(border_mask)))
+                
+                if not border_points:
+                    continue
+                
+                # Process points in batches
+                batch_size = 1000
                 deletable_points = []
                 
-                # Get border points for efficiency
-                border_points = np.argwhere((padded == 1) & 
-                    np.any([np.roll(padded == 0, shift, axis=ax) 
-                           for ax, shift in [(0,1), (0,-1), (1,1), (1,-1), (2,1), (2,-1)]], axis=0))
-                
-                # Process points in batches for memory efficiency
-                batch_size = 1000
                 for i in range(0, len(border_points), batch_size):
                     batch = border_points[i:i+batch_size]
                     
-                    for x, y, z in batch:
-                        # Skip border due to padding
-                        if (x < 1 or y < 1 or z < 1 or 
-                            x >= padded.shape[0]-1 or 
-                            y >= padded.shape[1]-1 or 
-                            z >= padded.shape[2]-1):
+                    for z, y, x in batch:
+                        # Get 3x3x3 neighborhood
+                        nb = padded[z-1:z+2, y-1:y+2, x-1:x+2].copy()
+                        
+                        # Quick check for template match
+                        if not np.all(nb[direction_templates[direction]]):
                             continue
                         
-                        # Get 3x3x3 neighborhood
-                        nb = padded[x-1:x+2, y-1:y+2, z-1:z+2]
-                        
-                        # Check if point matches template for this direction
-                        if matches_deletion_template(nb, direction):
-                            # Check if point is simple
-                            if is_simple_point(nb):
-                                deletable_points.append((x,y,z))
+                        # Check if point is simple
+                        if is_simple_point(nb):
+                            deletable_points.append((z,y,x))
                     
                     # Periodic garbage collection
                     if i % 5000 == 0:
                         gc.collect()
                 
                 # Delete points simultaneously
-                if len(deletable_points) > 0:
+                if deletable_points:
                     changed = True
-                    for x,y,z in deletable_points:
-                        padded[x,y,z] = 0
+                    for z,y,x in deletable_points:
+                        padded[z,y,x] = 0
             
             if not changed:
                 break
-                
+            
             iteration += 1
             pbar.update(1)
             
