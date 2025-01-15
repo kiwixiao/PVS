@@ -3,6 +3,7 @@ import SimpleITK as sitk
 from scipy.ndimage import gaussian_filter
 import os
 import gc
+from scipy import linalg
 
 def calculate_vesselness(image_array, mask, scales, output_dir=None, load_hessian=True):
     """Calculate vesselness measure using multi-scale Hessian analysis
@@ -145,60 +146,56 @@ def save_vesselness_results(vesselness, sigma_max, vessel_direction, output_dir)
     )
 
 def calculate_hessian(image_array, scale):
-    """Calculate Hessian matrix components using SimpleITK's recursive Gaussian filter"""
+    """Calculate Hessian matrix components using SimpleITK's recursive Gaussian filter with optimized memory usage"""
     from tqdm import tqdm
     import gc
+    import SimpleITK as sitk
+    import numpy as np
     
     # Convert numpy array to SimpleITK image
     image = sitk.GetImageFromArray(image_array)
     
-    # Initialize Hessian components
-    deriv_filters = []
-    
-    # Create progress bar for derivative calculations
+    # Initialize Hessian components dictionary
+    hessian = {}
+    component_names = ['dxx', 'dxy', 'dxz', 'dyy', 'dyz', 'dzz']
     derivative_pairs = [(i,j) for i in range(3) for j in range(i, 3)]
     
-    for i, j in tqdm(derivative_pairs, desc=f"Computing Hessian at scale {scale:.2f}", leave=False):
+    # Pre-create Gaussian filters to avoid recreation
+    gaussian_filters = {}
+    for order in [1, 2]:
+        gaussian_filters[order] = sitk.RecursiveGaussianImageFilter()
+        gaussian_filters[order].SetSigma(scale)
+        gaussian_filters[order].SetOrder(order)
+    
+    for (i, j), component in tqdm(zip(derivative_pairs, component_names), 
+                                desc=f"Computing Hessian at scale {scale:.2f}", 
+                                total=len(derivative_pairs),
+                                leave=False):
         if i == j:
             # Second derivative
-            gaussian = sitk.RecursiveGaussianImageFilter()
-            gaussian.SetSigma(scale)
-            gaussian.SetOrder(2)
-            gaussian.SetDirection(i)
-            deriv = gaussian.Execute(image)
+            gaussian_filters[2].SetDirection(i)
+            deriv = gaussian_filters[2].Execute(image)
         else:
-            # Mixed derivative
-            gaussian1 = sitk.RecursiveGaussianImageFilter()
-            gaussian1.SetSigma(scale)
-            gaussian1.SetOrder(1)
-            gaussian1.SetDirection(i)
-            
-            gaussian2 = sitk.RecursiveGaussianImageFilter()
-            gaussian2.SetSigma(scale)
-            gaussian2.SetOrder(1)
-            gaussian2.SetDirection(j)
-            
-            deriv = gaussian2.Execute(gaussian1.Execute(image))
+            # Mixed derivative - compute sequentially to save memory
+            gaussian_filters[1].SetDirection(i)
+            temp = gaussian_filters[1].Execute(image)
+            gaussian_filters[1].SetDirection(j)
+            deriv = gaussian_filters[1].Execute(temp)
+            del temp
+            gc.collect()
         
-        deriv_filters.append(deriv)
+        # Convert to numpy array and store
+        hessian[component] = sitk.GetArrayFromImage(deriv)
+        del deriv
         gc.collect()
-    
-    # Convert to numpy arrays at the end
-    hessian = {
-        'dxx': sitk.GetArrayFromImage(deriv_filters[0]),
-        'dxy': sitk.GetArrayFromImage(deriv_filters[1]),
-        'dxz': sitk.GetArrayFromImage(deriv_filters[2]),
-        'dyy': sitk.GetArrayFromImage(deriv_filters[3]),
-        'dyz': sitk.GetArrayFromImage(deriv_filters[4]),
-        'dzz': sitk.GetArrayFromImage(deriv_filters[5])
-    }
     
     return hessian
 
 def calculate_eigenvalues(hessian, mask):
-    """Calculate eigenvalues and eigenvectors of Hessian matrix within ROI"""
+    """Calculate eigenvalues and eigenvectors of Hessian matrix within ROI using vectorized operations"""
     from tqdm import tqdm
     import gc
+    import numpy as np
     
     # Get dimensions
     shape = hessian['dxx'].shape
@@ -207,69 +204,126 @@ def calculate_eigenvalues(hessian, mask):
     
     # Get ROI indices
     roi_indices = np.where(mask > 0)
-    
-    # Process only ROI voxels
     total_voxels = len(roi_indices[0])
-    with tqdm(total=total_voxels, desc="Computing eigenvalues", leave=False) as pbar:
-        for i in range(total_voxels):
-            z, y, x = roi_indices[0][i], roi_indices[1][i], roi_indices[2][i]
+    print(f"Total voxels to process: {total_voxels}")
+    
+    # Process in batches to manage memory
+    batch_size = 10000  # Adjust based on available memory
+    for i in tqdm(range(0, total_voxels, batch_size), desc="Computing eigenvalues", leave=False):
+        batch_end = min(i + batch_size, total_voxels)
+        batch_size_current = batch_end - i
+        
+        # Get current batch indices
+        batch_indices = (
+            roi_indices[0][i:batch_end],
+            roi_indices[1][i:batch_end],
+            roi_indices[2][i:batch_end]
+        )
+        
+        # Construct Hessian matrices for current batch
+        batch_H = np.zeros((batch_size_current, 3, 3), dtype=np.float32)
+        
+        # Fill the symmetric matrix
+        batch_H[:,0,0] = hessian['dxx'][batch_indices]
+        batch_H[:,0,1] = batch_H[:,1,0] = hessian['dxy'][batch_indices]
+        batch_H[:,0,2] = batch_H[:,2,0] = hessian['dxz'][batch_indices]
+        batch_H[:,1,1] = hessian['dyy'][batch_indices]
+        batch_H[:,1,2] = batch_H[:,2,1] = hessian['dyz'][batch_indices]
+        batch_H[:,2,2] = hessian['dzz'][batch_indices]
+        
+        # Debug print
+        if i == 0:
+            print(f"Batch Hessian shape: {batch_H.shape}")
+            print(f"First Hessian matrix:\n{batch_H[0]}")
+            # Verify matrix is symmetric
+            is_symmetric = np.allclose(batch_H[0], batch_H[0].T)
+            print(f"Is symmetric: {is_symmetric}")
+        
+        # Verify each matrix is valid before eigendecomposition
+        if not np.all(np.isfinite(batch_H)):
+            raise ValueError("Found non-finite values in Hessian matrix")
+        
+        # Process each matrix individually to ensure proper shape
+        w_batch = np.zeros((batch_size_current, 3), dtype=np.float32)
+        v_batch = np.zeros((batch_size_current, 3, 3), dtype=np.float32)
+        
+        for j in range(batch_size_current):
+            # Ensure the matrix is exactly (3,3) and symmetric
+            H = np.array(batch_H[j], dtype=np.float32)
+            H = (H + H.T) / 2  # Ensure perfect symmetry
             
-            # Construct Hessian matrix at this voxel
-            H = np.array([
-                [hessian['dxx'][z,y,x], hessian['dxy'][z,y,x], hessian['dxz'][z,y,x]],
-                [hessian['dxy'][z,y,x], hessian['dyy'][z,y,x], hessian['dyz'][z,y,x]],
-                [hessian['dxz'][z,y,x], hessian['dyz'][z,y,x], hessian['dzz'][z,y,x]]
-            ])
-            
-            # Compute eigenvalues and eigenvectors
-            w, v = np.linalg.eigh(H)
-            
-            # Sort by absolute eigenvalue
-            idx = np.argsort(np.abs(w))
-            eigenvalues[:,z,y,x] = w[idx]
-            eigenvectors[:,z,y,x] = v[:,idx]
-            
-            pbar.update(1)
-            
-            # Garbage collection periodically
-            if i % 1000 == 0:
-                gc.collect()
+            try:
+                w, v = np.linalg.eigh(H)
+                w_batch[j] = w
+                v_batch[j] = v
+            except np.linalg.LinAlgError as e:
+                print(f"Error in matrix {j} of batch {i}:")
+                print(f"Matrix:\n{H}")
+                raise e
+        
+        # Sort by absolute eigenvalue
+        abs_w_batch = np.abs(w_batch)
+        sort_idx = np.argsort(abs_w_batch, axis=1)
+        
+        # Apply sorting to eigenvalues and eigenvectors
+        for j in range(batch_size_current):
+            idx = sort_idx[j]
+            z, y, x = batch_indices[0][j], batch_indices[1][j], batch_indices[2][j]
+            eigenvalues[:,z,y,x] = w_batch[j,idx]
+            eigenvectors[:,z,y,x] = v_batch[j,:,idx]
+        
+        if i % (batch_size * 10) == 0:
+            gc.collect()
     
     return eigenvalues, eigenvectors
 
 def frangi_vesselness(eigenvalues, image_array):
-    """Calculate Frangi vesselness measure"""
-    # Extract sorted eigenvalues
+    """Calculate Frangi vesselness measure using optimized vectorized operations"""
+    # Extract sorted eigenvalues - use views instead of copies
     lambda1 = eigenvalues[0]  # Smallest magnitude
     lambda2 = eigenvalues[1]  # Medium magnitude
     lambda3 = eigenvalues[2]  # Largest magnitude
     
-    # Add small epsilon to avoid division by zero
-    epsilon = 1e-10
+    # Frangi parameters (constants)
+    ALPHA = 0.5  # Controls sensitivity to Ra
+    BETA = 0.5   # Controls sensitivity to Rb
+    C = 70.0     # Controls sensitivity to S
+    EPSILON = 1e-10  # Small value to avoid division by zero
+    HU_THRESHOLD = -750  # HU threshold for valid intensity
     
-    # Calculate vesselness measures
-    Ra = np.abs(lambda2) / (np.abs(lambda3) + epsilon)  # plate vs line
-    Rb = np.abs(lambda1) / (np.sqrt(np.abs(lambda2 * lambda3)) + epsilon)  # blob vs line
-    S = np.sqrt(lambda2**2 + lambda3**2)  # structure strength (using only λ2 and λ3)
+    # Pre-compute valid voxels mask to avoid redundant computations
+    valid_voxels = (image_array >= HU_THRESHOLD) & (lambda2 < 0) & (lambda3 < 0)
     
-    # Frangi parameters
-    alpha = 0.5  # Controls sensitivity to Ra
-    beta = 0.5   # Controls sensitivity to Rb
-    c = 70.0     # Controls sensitivity to S
+    # Only allocate arrays for valid voxels to save memory
+    if not np.any(valid_voxels):
+        return np.zeros_like(lambda1)
     
-    # Initialize vesselness
+    # Get valid indices to reduce computation
+    valid_indices = np.where(valid_voxels)
+    
+    # Pre-compute terms for valid voxels only
+    abs_lambda2 = np.abs(lambda2[valid_indices])
+    abs_lambda3 = np.abs(lambda3[valid_indices])
+    
+    # Calculate Ra (plate vs line)
+    Ra = abs_lambda2 / (abs_lambda3 + EPSILON)
+    
+    # Calculate Rb (blob vs line)
+    abs_lambda1 = np.abs(lambda1[valid_indices])
+    Rb = abs_lambda1 / (np.sqrt(abs_lambda2 * abs_lambda3) + EPSILON)
+    
+    # Calculate S (structure strength)
+    S = np.sqrt(lambda2[valid_indices]**2 + lambda3[valid_indices]**2)
+    
+    # Calculate exponential terms
+    exp_Ra = np.exp(-Ra**2 / (2 * ALPHA**2))
+    exp_Rb = np.exp(-Rb**2 / (2 * BETA**2))
+    exp_S = np.exp(-S**2 / (2 * C**2))
+    
+    # Initialize output array
     vesselness = np.zeros_like(lambda1)
     
-    # Apply vesselness conditions
-    valid_intensity = image_array >= -750  # HU threshold
-    valid_eigenvalues = (lambda2 < 0) & (lambda3 < 0)  # tube-like structure
-    valid_voxels = valid_intensity & valid_eigenvalues
-    
     # Calculate vesselness only for valid voxels
-    vesselness[valid_voxels] = (
-        (1 - np.exp(-(Ra[valid_voxels]**2)/(2*alpha**2))) *
-        np.exp(-(Rb[valid_voxels]**2)/(2*beta**2)) *
-        (1 - np.exp(-(S[valid_voxels]**2)/(2*c**2)))
-    )
+    vesselness[valid_indices] = (1 - exp_Ra) * exp_Rb * (1 - exp_S)
     
     return vesselness

@@ -9,7 +9,7 @@ import gc
 
 def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     """
-    Implementation of Palagyi & Kuba's 6-subiteration thinning algorithm.
+    Optimized implementation of Palagyi & Kuba's 6-subiteration thinning algorithm.
     
     Args:
         binary_volume: 3D numpy array with binary vessel segmentation (1=vessel, 0=background)
@@ -24,51 +24,80 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     # Pad volume to handle border cases
     padded = np.pad(binary_volume, pad_width=1, mode='constant', constant_values=0)
     
+    # Pre-compute neighbor offset arrays for efficiency
+    z, y, x = np.ogrid[-1:2, -1:2, -1:2]
+    neighbor_offsets = list(zip(z.ravel(), y.ravel(), x.ravel()))
+    neighbor_offsets.remove((0,0,0))  # Remove center point
+    
+    # Direction templates (U,D,N,S,E,W)
+    direction_checks = [
+        (0,1,0),   # U: Up neighbor should be 0
+        (0,-1,0),  # D: Down neighbor should be 0
+        (1,0,0),   # N: North neighbor should be 0
+        (-1,0,0),  # S: South neighbor should be 0
+        (0,0,1),   # E: East neighbor should be 0
+        (0,0,-1)   # W: West neighbor should be 0
+    ]
+    
     # Continue until no points can be deleted
     iteration = 0
     with tqdm(desc="Thinning iterations", leave=False) as pbar:
         while True:
             changed = False
+            
             # Apply 6 subiterations in order (U,D,N,S,E,W)
-            for direction in range(6):
+            for direction, (dz, dy, dx) in enumerate(direction_checks):
+                # Get border points efficiently using numpy operations
+                border_mask = padded == 1
+                for offset_z, offset_y, offset_x in neighbor_offsets:
+                    rolled = np.roll(np.roll(np.roll(padded == 0, 
+                                                    offset_z, axis=0),
+                                           offset_y, axis=1),
+                                   offset_x, axis=2)
+                    border_mask &= rolled
+                
+                border_points = np.argwhere(border_mask)
+                
+                # Process points in larger batches
+                batch_size = 5000
                 deletable_points = []
                 
-                # Get border points for efficiency
-                border_points = np.argwhere((padded == 1) & 
-                    np.any([np.roll(padded == 0, shift, axis=ax) 
-                           for ax, shift in [(0,1), (0,-1), (1,1), (1,-1), (2,1), (2,-1)]], axis=0))
-                
-                # Process points in batches for memory efficiency
-                batch_size = 1000
                 for i in range(0, len(border_points), batch_size):
                     batch = border_points[i:i+batch_size]
                     
-                    for x, y, z in batch:
-                        # Skip border due to padding
-                        if (x < 1 or y < 1 or z < 1 or 
-                            x >= padded.shape[0]-1 or 
-                            y >= padded.shape[1]-1 or 
-                            z >= padded.shape[2]-1):
-                            continue
-                        
-                        # Get 3x3x3 neighborhood
-                        nb = padded[x-1:x+2, y-1:y+2, z-1:z+2]
-                        
-                        # Check if point matches template for this direction
-                        if matches_deletion_template(nb, direction):
-                            # Check if point is simple
-                            if is_simple_point(nb):
-                                deletable_points.append((x,y,z))
+                    # Skip border points due to padding
+                    valid_mask = ((batch[:,0] >= 1) & (batch[:,1] >= 1) & (batch[:,2] >= 1) &
+                                (batch[:,0] < padded.shape[0]-1) & 
+                                (batch[:,1] < padded.shape[1]-1) & 
+                                (batch[:,2] < padded.shape[2]-1))
+                    batch = batch[valid_mask]
                     
-                    # Periodic garbage collection
-                    if i % 5000 == 0:
+                    if len(batch) == 0:
+                        continue
+                    
+                    # Extract neighborhoods efficiently
+                    neighborhoods = np.stack([padded[z-1:z+2, y-1:y+2, x-1:x+2] 
+                                           for z,y,x in batch])
+                    
+                    # Check template and simplicity in parallel
+                    template_match = np.array([matches_deletion_template(nb, direction) 
+                                            for nb in neighborhoods])
+                    simple_points = np.array([is_simple_point(nb) 
+                                           for nb in neighborhoods[template_match]])
+                    
+                    # Add deletable points
+                    deletable_idx = np.where(template_match)[0][simple_points]
+                    if len(deletable_idx) > 0:
+                        deletable_points.extend(batch[deletable_idx])
+                    
+                    if i % 10000 == 0:
                         gc.collect()
                 
                 # Delete points simultaneously
                 if len(deletable_points) > 0:
                     changed = True
-                    for x,y,z in deletable_points:
-                        padded[x,y,z] = 0
+                    deletable_points = np.array(deletable_points)
+                    padded[deletable_points[:,0], deletable_points[:,1], deletable_points[:,2]] = 0
             
             if not changed:
                 break

@@ -209,7 +209,7 @@ def create_cylindrical_roi(points, centerline_points, direction, radius):
     return min_distances <= radius
 
 def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_types, sigma_max, vessel_directions, parameter_set='default'):
-    """Perform local optimal thresholding around centerlines
+    """Perform local optimal thresholding around centerlines using vectorized operations
     
     Args:
         binary_vessels: Initial binary vessel mask
@@ -224,88 +224,91 @@ def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_ty
     params = ROIParameters.get_parameter_sets()[parameter_set]
     image_shape = vesselness.shape
     
-    # Initialize output
+    # Initialize output arrays
     final_vessels = np.zeros_like(binary_vessels)
     local_thresholds = np.zeros_like(vesselness)
     
-    # Process segment points first
-    segment_points = np.where(point_types == 2)
-    print(f"Processing {len(segment_points[0])} segment points...")
-    
-    # Group connected segment points using vectorized operations
-    from scipy.ndimage import label
+    # Process segment points first - use vectorized operations
     labeled_segments, num_segments = label(point_types == 2)
     print(f"Found {num_segments} connected segments")
     
-    # Process each segment
+    # Pre-compute meshgrid for ROI creation
+    z_base, y_base, x_base = np.meshgrid(np.arange(image_shape[0]),
+                                        np.arange(image_shape[1]),
+                                        np.arange(image_shape[2]),
+                                        indexing='ij')
+    
+    # Process segments in parallel where possible
     for segment_id in tqdm(range(1, num_segments + 1), desc="Processing segments", leave=True):
         segment_mask = labeled_segments == segment_id
         z, y, x = np.where(segment_mask)
         if len(z) == 0:
             continue
             
-        # Convert points to list of tuples for split_segments
-        segment_points = list(zip(z, y, x))
-        
-        # Split long segments into overlapping pieces
-        sub_segments = split_segments(centerlines, segment_points, 
-                                    max_length=params.max_segment_length, 
-                                    overlap=params.overlap)
+        # Split into sub-segments efficiently
+        segment_points = np.column_stack([z, y, x])
+        sub_segments = split_segments_vectorized(segment_points, 
+                                               max_length=params.max_segment_length,
+                                               overlap=params.overlap)
         
         # Process each sub-segment
         for sub_segment in sub_segments:
-            sub_z, sub_y, sub_x = zip(*sub_segment)
-            centerline_points = np.array(list(zip(sub_z, sub_y, sub_x)))
-            
-            # Calculate ROI parameters for this sub-segment
+            # Calculate ROI parameters efficiently
             sub_mask = np.zeros_like(binary_vessels, dtype=bool)
-            sub_mask[sub_z, sub_y, sub_x] = True
+            sub_mask[sub_segment[:,0], sub_segment[:,1], sub_segment[:,2]] = True
             max_sigma = np.max(sigma_max[sub_mask])
             radius = params.roi_multiplier * max(max_sigma, params.min_radius_cyl)
             
-            # Get sub-segment bounds with padding
+            # Get bounds with padding
             pad = int(np.ceil(radius))
-            min_bounds = np.maximum([min(sub_z) - pad, min(sub_y) - pad, min(sub_x) - pad], 0)
-            max_bounds = np.minimum([max(sub_z) + pad, max(sub_y) + pad, max(sub_x) + pad], np.array(image_shape) - 1)
+            min_bounds = np.maximum([np.min(sub_segment[:,0]) - pad,
+                                   np.min(sub_segment[:,1]) - pad,
+                                   np.min(sub_segment[:,2]) - pad], 0)
+            max_bounds = np.minimum([np.max(sub_segment[:,0]) + pad,
+                                   np.max(sub_segment[:,1]) + pad,
+                                   np.max(sub_segment[:,2]) + pad], 
+                                  np.array(image_shape) - 1)
             
-            # Extract local region
+            # Extract local region efficiently
             local_vesselness = vesselness[min_bounds[0]:max_bounds[0]+1,
                                         min_bounds[1]:max_bounds[1]+1,
                                         min_bounds[2]:max_bounds[2]+1]
             
-            # Create grid of points
-            local_shape = tuple(max_bounds - min_bounds + 1)
-            zz, yy, xx = np.meshgrid(np.arange(local_shape[0]),
-                                    np.arange(local_shape[1]),
-                                    np.arange(local_shape[2]),
-                                    indexing='ij')
-            
-            # Calculate average direction for this sub-segment
-            sub_directions = vessel_directions[sub_z, sub_y, sub_x]
-            # Ensure consistent direction (avoid sign flips)
+            # Calculate average direction vectorized
+            sub_directions = vessel_directions[sub_segment[:,0], sub_segment[:,1], sub_segment[:,2]]
             ref_direction = sub_directions[0]
-            for i in range(1, len(sub_directions)):
-                if np.dot(sub_directions[i], ref_direction) < 0:
-                    sub_directions[i] = -sub_directions[i]
+            # Fix direction signs efficiently
+            sign_flips = np.sign(np.sum(sub_directions * ref_direction, axis=1))
+            sub_directions *= sign_flips[:,np.newaxis]
             direction = np.mean(sub_directions, axis=0)
-            direction = direction / np.linalg.norm(direction)
+            direction /= np.linalg.norm(direction)
             
-            # Create precise cylindrical ROI
-            points = np.stack([zz.ravel(), yy.ravel(), xx.ravel()], axis=1)
-            # Adjust centerline points to local coordinates
-            local_centerline = centerline_points - min_bounds.reshape(1, 3)
-            local_mask = create_cylindrical_roi(points, local_centerline, direction, radius)
+            # Create cylindrical ROI efficiently
+            local_shape = tuple(max_bounds - min_bounds + 1)
+            points = np.column_stack([
+                z_base[min_bounds[0]:max_bounds[0]+1,
+                      min_bounds[1]:max_bounds[1]+1,
+                      min_bounds[2]:max_bounds[2]+1].ravel(),
+                y_base[min_bounds[0]:max_bounds[0]+1,
+                      min_bounds[1]:max_bounds[1]+1,
+                      min_bounds[2]:max_bounds[2]+1].ravel(),
+                x_base[min_bounds[0]:max_bounds[0]+1,
+                      min_bounds[1]:max_bounds[1]+1,
+                      min_bounds[2]:max_bounds[2]+1].ravel()
+            ])
+            local_centerline = sub_segment - min_bounds.reshape(1, 3)
+            local_mask = create_cylindrical_roi_vectorized(points, local_centerline, direction, radius)
             local_mask = local_mask.reshape(local_shape)
             
-            # Calculate optimal threshold
+            # Calculate and apply threshold efficiently
             if np.any(local_mask):
                 vesselness_roi = local_vesselness[local_mask]
-                threshold = optimal_threshold(vesselness_roi)
+                threshold = optimal_threshold_vectorized(vesselness_roi)
                 
-                # Apply threshold
+                # Apply threshold with vectorized operations
                 grown_mask = (local_vesselness >= threshold) & local_mask & (local_vesselness >= params.min_vesselness)
                 
-                # Update results
+                # Update results efficiently
                 final_vessels[min_bounds[0]:max_bounds[0]+1,
                             min_bounds[1]:max_bounds[1]+1,
                             min_bounds[2]:max_bounds[2]+1] |= grown_mask
@@ -313,147 +316,100 @@ def local_optimal_thresholding(binary_vessels, vesselness, centerlines, point_ty
                                min_bounds[1]:max_bounds[1]+1,
                                min_bounds[2]:max_bounds[2]+1][grown_mask] = threshold
     
-    # Process special points (bifurcations and endpoints)
-    special_points = np.where((point_types == 1) | (point_types == 3))
-    print(f"Processing {len(special_points[0])} special points...")
+    # Process special points (bifurcations and endpoints) with vectorized operations
+    special_mask = (point_types == 1) | (point_types == 3)
+    special_points = np.argwhere(special_mask)
+    print(f"Processing {len(special_points)} special points...")
     
-    for i in tqdm(range(len(special_points[0])), desc="Processing special points", leave=True):
-        z, y, x = special_points[0][i], special_points[1][i], special_points[2][i]
+    # Process special points in batches
+    batch_size = 100
+    for i in tqdm(range(0, len(special_points), batch_size), desc="Processing special points", leave=True):
+        batch = special_points[i:i+batch_size]
         
-        # Skip endpoints connected to bifurcations
-        if point_types[z,y,x] == 1:
-            # Check 26-neighborhood for bifurcations using array operations
-            z_slice = slice(max(0, z-1), min(z+2, image_shape[0]))
-            y_slice = slice(max(0, y-1), min(y+2, image_shape[1]))
-            x_slice = slice(max(0, x-1), min(x+2, image_shape[2]))
-            if np.any(point_types[z_slice, y_slice, x_slice] == 3):
-                continue
+        # Skip endpoints connected to bifurcations efficiently
+        endpoint_mask = point_types[batch[:,0], batch[:,1], batch[:,2]] == 1
+        if np.any(endpoint_mask):
+            endpoint_batch = batch[endpoint_mask]
+            for z, y, x in endpoint_batch:
+                z_slice = slice(max(0, z-1), min(z+2, image_shape[0]))
+                y_slice = slice(max(0, y-1), min(y+2, image_shape[1]))
+                x_slice = slice(max(0, x-1), min(x+2, image_shape[2]))
+                if np.any(point_types[z_slice, y_slice, x_slice] == 3):
+                    continue
+                
+                # Process valid endpoint
+                radius = params.roi_multiplier * max(sigma_max[z,y,x], params.min_radius_sphere)
+                process_special_point(z, y, x, radius, vesselness, final_vessels, 
+                                   local_thresholds, params.min_vesselness, image_shape)
         
-        # Calculate ROI parameters
-        radius = params.roi_multiplier * max(sigma_max[z,y,x], params.min_radius_sphere)
-        
-        # Get ROI bounds with padding
-        pad = int(np.ceil(radius))
-        min_bounds = np.maximum([z-pad, y-pad, x-pad], 0)
-        max_bounds = np.minimum([z+pad, y+pad, x+pad], np.array(image_shape) - 1)
-        
-        # Extract local region
-        local_vesselness = vesselness[min_bounds[0]:max_bounds[0]+1,
-                                    min_bounds[1]:max_bounds[1]+1,
-                                    min_bounds[2]:max_bounds[2]+1]
-        
-        # Create spherical mask using vectorized operations
-        local_shape = tuple(max_bounds - min_bounds + 1)
-        zz, yy, xx = np.meshgrid(np.arange(local_shape[0]),
-                                np.arange(local_shape[1]),
-                                np.arange(local_shape[2]),
-                                indexing='ij')
-        
-        local_center = np.array([z,y,x]) - min_bounds
-        dist = np.sqrt((zz - local_center[0])**2 + 
-                      (yy - local_center[1])**2 + 
-                      (xx - local_center[2])**2)
-        local_mask = dist <= radius
-        
-        # Calculate optimal threshold
-        if np.any(local_mask):
-            vesselness_roi = local_vesselness[local_mask]
-            threshold = optimal_threshold(vesselness_roi)
-            
-            # Apply threshold
-            grown_mask = (local_vesselness >= threshold) & local_mask & (local_vesselness >= params.min_vesselness)
-            
-            # Update results
-            final_vessels[min_bounds[0]:max_bounds[0]+1,
-                        min_bounds[1]:max_bounds[1]+1,
-                        min_bounds[2]:max_bounds[2]+1] |= grown_mask
-            local_thresholds[min_bounds[0]:max_bounds[0]+1,
-                           min_bounds[1]:max_bounds[1]+1,
-                           min_bounds[2]:max_bounds[2]+1][grown_mask] = threshold
+        # Process remaining special points
+        non_endpoint_mask = ~endpoint_mask
+        if np.any(non_endpoint_mask):
+            non_endpoint_batch = batch[non_endpoint_mask]
+            for z, y, x in non_endpoint_batch:
+                radius = params.roi_multiplier * max(sigma_max[z,y,x], params.min_radius_sphere)
+                process_special_point(z, y, x, radius, vesselness, final_vessels, 
+                                   local_thresholds, params.min_vesselness, image_shape)
     
     return final_vessels, local_thresholds
 
-def split_segments(centerlines, point_types, max_length, overlap):
-    """Split long segments into overlapping subsegments"""
-    segments = []
-    current_segment = []
+def process_special_point(z, y, x, radius, vesselness, final_vessels, local_thresholds, min_vesselness, image_shape):
+    """Process a single special point efficiently"""
+    # Get ROI bounds with padding
+    pad = int(np.ceil(radius))
+    min_bounds = np.maximum([z-pad, y-pad, x-pad], 0)
+    max_bounds = np.minimum([z+pad, y+pad, x+pad], np.array(image_shape) - 1)
     
-    # Find segment points
-    segment_points = zip(*np.where(point_types == 2))
+    # Extract local region
+    local_vesselness = vesselness[min_bounds[0]:max_bounds[0]+1,
+                                min_bounds[1]:max_bounds[1]+1,
+                                min_bounds[2]:max_bounds[2]+1]
     
-    for point in segment_points:
-        current_segment.append(point)
+    # Create spherical mask efficiently
+    local_shape = tuple(max_bounds - min_bounds + 1)
+    local_center = np.array([z,y,x]) - min_bounds
+    zz, yy, xx = np.meshgrid(np.arange(local_shape[0]),
+                            np.arange(local_shape[1]),
+                            np.arange(local_shape[2]),
+                            indexing='ij')
+    dist = np.sqrt((zz - local_center[0])**2 + 
+                   (yy - local_center[1])**2 + 
+                   (xx - local_center[2])**2)
+    local_mask = dist <= radius
+    
+    # Calculate and apply threshold
+    if np.any(local_mask):
+        vesselness_roi = local_vesselness[local_mask]
+        threshold = optimal_threshold_vectorized(vesselness_roi)
         
-        if len(current_segment) >= max_length:
-            # Add segment with overlap
-            segments.append(current_segment)
-            # Keep overlap points for next segment
-            current_segment = current_segment[-overlap:]
+        # Apply threshold with vectorized operations
+        grown_mask = (local_vesselness >= threshold) & local_mask & (local_vesselness >= min_vesselness)
+        
+        # Update results efficiently
+        final_vessels[min_bounds[0]:max_bounds[0]+1,
+                    min_bounds[1]:max_bounds[1]+1,
+                    min_bounds[2]:max_bounds[2]+1] |= grown_mask
+        local_thresholds[min_bounds[0]:max_bounds[0]+1,
+                       min_bounds[1]:max_bounds[1]+1,
+                       min_bounds[2]:max_bounds[2]+1][grown_mask] = threshold
+
+def split_segments_vectorized(points, max_length, overlap):
+    """Split segments into overlapping subsegments using vectorized operations"""
+    if len(points) <= max_length:
+        return [points]
+        
+    segments = []
+    start_idx = 0
     
-    # Add remaining points
-    if current_segment:
-        segments.append(current_segment)
-    
+    while start_idx < len(points):
+        end_idx = min(start_idx + max_length, len(points))
+        segments.append(points[start_idx:end_idx])
+        start_idx = end_idx - overlap
+        
     return segments
 
-def region_growing(seeds, vesselness, threshold, roi_mask, min_vesselness):
-    """Perform region growing within ROI"""
-    # Initialize segmentation
-    segmented = np.zeros_like(roi_mask)
-    
-    # Initialize queue with seed points
-    queue = list(seeds)
-    visited = set()
-    
-    # Grow region
-    while queue:
-        z,y,x = queue.pop(0)
-        if (z,y,x) in visited:
-            continue
-            
-        visited.add((z,y,x))
-        
-        # Check if point is valid
-        if (0 <= z < roi_mask.shape[0] and 
-            0 <= y < roi_mask.shape[1] and 
-            0 <= x < roi_mask.shape[2] and
-            roi_mask[z,y,x] and
-            vesselness[z,y,x] >= threshold and
-            vesselness[z,y,x] >= min_vesselness):
-            
-            segmented[z,y,x] = True
-            
-            # Add neighbors to queue
-            for dz in [-1,0,1]:
-                for dy in [-1,0,1]:
-                    for dx in [-1,0,1]:
-                        if dz == 0 and dy == 0 and dx == 0:
-                            continue
-                        queue.append((z+dz, y+dy, x+dx))
-    
-    return segmented
-
-def ensure_connectivity(mask):
-    """Ensure vessel connectivity by removing small components"""
-    from scipy.ndimage import label
-    
-    # Label connected components
-    labeled, num = label(mask)
-    
-    if num == 0:
-        return mask
-        
-    # Find largest component
-    sizes = np.bincount(labeled.ravel())[1:]
-    largest = np.argmax(sizes) + 1
-    
-    # Keep only the largest component
-    mask = labeled == largest
-    
-    return mask
-
-def optimal_threshold(intensities):
-    """Calculate optimal threshold using Ridler's method"""
+def optimal_threshold_vectorized(intensities):
+    """Vectorized implementation of Ridler's optimal threshold method"""
     if len(intensities) == 0:
         return 0
     
@@ -464,11 +420,11 @@ def optimal_threshold(intensities):
     epsilon = 1e-6
     max_iter = 100
     for _ in range(max_iter):
-        # Split intensities
+        # Split intensities efficiently
         below = intensities[intensities < t]
         above = intensities[intensities >= t]
         
-        # Calculate means
+        # Calculate means vectorized
         mean_below = np.mean(below) if len(below) > 0 else np.min(intensities)
         mean_above = np.mean(above) if len(above) > 0 else np.max(intensities)
         
@@ -480,6 +436,24 @@ def optimal_threshold(intensities):
         t = new_t
     
     return t
+
+def create_cylindrical_roi_vectorized(points, centerline, direction, radius):
+    """Create cylindrical ROI using vectorized operations"""
+    # Project points onto centerline direction
+    centerline_mean = np.mean(centerline, axis=0)
+    projected_distances = np.abs(np.dot(points - centerline_mean, direction))
+    
+    # Find closest point on centerline for each point
+    distances = np.zeros(len(points))
+    for center in centerline:
+        point_distances = np.linalg.norm(points - center, axis=1)
+        distances = np.minimum(distances, point_distances)
+    
+    # Points within cylinder have:
+    # 1. Distance to centerline <= radius
+    # 2. Projected distance <= half cylinder length
+    cylinder_length = np.linalg.norm(centerline[-1] - centerline[0])
+    return (distances <= radius) & (projected_distances <= cylinder_length/2)
 
 def save_local_threshold_results(final_vessels, local_thresholds, output_dir, parameter_set='default', custom_params=None):
     """Save local thresholding results and metadata
