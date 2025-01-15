@@ -132,6 +132,9 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                     }
                 }
                 
+                # Add the record to the list before updating it
+                scale_records['optimizations'].append(optimization_record)
+                
                 # Store first few optimizations for visualization
                 if len(scale_records['visualization_data']['convergence_plots']) < 10:
                     scale_records['visualization_data']['convergence_plots'].append({
@@ -146,7 +149,7 @@ def calculate_vesselness(image_array, mask, scales, output_dir=None, project_nam
                 vesselness_opt = frangi_vesselness_at_point(eigenvalues_opt, image_array[z,y,x])
                 vesselness_opt *= optimal_scale  # γ-normalization
                 
-                # Update the last optimization record with final response
+                # Update the optimization record with final response
                 scale_records['optimizations'][-1]['final_response'] = float(vesselness_opt)
                 
                 # Update if optimized response is better
