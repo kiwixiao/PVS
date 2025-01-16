@@ -1,0 +1,11 @@
+{
+  "parameters": {
+    "min_vesselness": 0.05,
+    "roi_multiplier": 1.5,
+    "min_radius_cyl": 3.0,
+    "min_radius_sphere": 4.0,
+    "max_segment_length": 20,
+    "overlap": 5,
+    "parameter_set": "default"
+  }
+}
