@@ -8,10 +8,56 @@ from vtk.util import numpy_support
 import gc
 from scipy.ndimage import label
 
+def matches_deletion_template(neighborhood, direction_idx):
+    """Check if point matches deletion template for current direction
+    
+    Args:
+        neighborhood: 3x3x3 binary neighborhood
+        direction_idx: Index of current direction (0=U, 1=D, 2=N, 3=S, 4=E, 5=W)
+        
+    Returns:
+        bool: True if point can be deleted, False otherwise
+    """
+    # Check if point has background neighbor in current direction
+    if direction_idx == 0:  # U
+        return neighborhood[2,1,1] == 0
+    elif direction_idx == 1:  # D
+        return neighborhood[0,1,1] == 0
+    elif direction_idx == 2:  # N
+        return neighborhood[1,2,1] == 0
+    elif direction_idx == 3:  # S
+        return neighborhood[1,0,1] == 0
+    elif direction_idx == 4:  # E
+        return neighborhood[1,1,2] == 0
+    else:  # W
+        return neighborhood[1,1,0] == 0
+
+def is_simple_point(neighborhood):
+    """Check if point is simple (its removal won't change topology)
+    
+    Args:
+        neighborhood: 3x3x3 binary neighborhood
+        
+    Returns:
+        bool: True if point is simple, False otherwise
+    """
+    center = (1, 1, 1)
+    
+    # Count number of connected components in 26-neighborhood
+    # First with center point
+    labeled_with, num_with = label(neighborhood, structure=np.ones((3,3,3)))
+    
+    # Then without center point
+    temp = neighborhood.copy()
+    temp[center] = 0
+    labeled_without, num_without = label(temp, structure=np.ones((3,3,3)))
+    
+    # Point is simple if removing it doesn't change number of connected components
+    return num_with == num_without
+
 def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     """
-    Optimized implementation of Palagyi & Kuba's 6-subiteration thinning algorithm.
-    Modified to be less aggressive in thinning while maintaining vessel connectivity.
+    Implementation of Palagyi & Kuba's 6-subiteration thinning algorithm.
     
     Args:
         binary_volume: 3D numpy array with binary vessel segmentation (1=vessel, 0=background)
@@ -26,21 +72,6 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     # Pad volume to handle border cases
     padded = np.pad(binary_volume, pad_width=1, mode='constant', constant_values=0)
     
-    # Pre-compute neighbor offset arrays for efficiency
-    z, y, x = np.ogrid[-1:2, -1:2, -1:2]
-    neighbor_offsets = list(zip(z.ravel(), y.ravel(), x.ravel()))
-    neighbor_offsets.remove((0,0,0))  # Remove center point
-    
-    # Direction templates (U,D,N,S,E,W) - pre-compute for efficiency
-    direction_checks = [
-        (0,1,0),   # U: Up neighbor should be 0
-        (0,-1,0),  # D: Down neighbor should be 0
-        (1,0,0),   # N: North neighbor should be 0
-        (-1,0,0),  # S: South neighbor should be 0
-        (0,0,1),   # E: East neighbor should be 0
-        (0,0,-1)   # W: West neighbor should be 0
-    ]
-    
     # Pre-compute valid region mask to avoid repeated boundary checks
     valid_region = np.zeros_like(padded, dtype=bool)
     valid_region[1:-1, 1:-1, 1:-1] = True
@@ -52,55 +83,28 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
             changed = False
             
             # Apply 6 subiterations in order (U,D,N,S,E,W)
-            for direction_idx, (dz, dy, dx) in enumerate(direction_checks):
-                # Get border points efficiently using numpy operations
+            for direction_idx in range(6):
+                # Find border points
                 border_points = []
-                
-                # Find border points (points with at least one background neighbor)
                 points = np.argwhere(padded == 1)
+                
                 for z, y, x in points:
                     if not valid_region[z,y,x]:
                         continue
-                        
-                    # Check if point has background neighbor in current direction
-                    if padded[z+dz, y+dy, x+dx] == 0:
-                        # Check other neighbors to ensure it's a border point
-                        is_border = False
-                        for nz, ny, nx in neighbor_offsets:
-                            if padded[z+nz, y+ny, x+nx] == 0:
-                                is_border = True
-                                break
-                        if is_border:
+                    
+                    # Extract neighborhood
+                    neighborhood = padded[z-1:z+2, y-1:y+2, x-1:x+2].copy()
+                    
+                    # Check if point matches deletion template
+                    if matches_deletion_template(neighborhood, direction_idx):
+                        # Check if point is simple
+                        if is_simple_point(neighborhood):
                             border_points.append((z,y,x))
                 
-                if not border_points:
-                    continue
-                
-                # Process points in batches
-                batch_size = 1000
-                deletable_points = []
-                
-                for i in range(0, len(border_points), batch_size):
-                    batch = border_points[i:i+batch_size]
-                    
-                    # Check each point in batch
-                    for z, y, x in batch:
-                        # Extract neighborhood
-                        neighborhood = padded[z-1:z+2, y-1:y+2, x-1:x+2].copy()
-                        
-                        # Check if point matches deletion template
-                        if matches_deletion_template(neighborhood, direction_idx):
-                            # Check if point is simple (its removal won't change topology)
-                            if is_simple_point(neighborhood):
-                                deletable_points.append((z,y,x))
-                    
-                    if i % 10000 == 0:
-                        gc.collect()
-                
                 # Delete points simultaneously
-                if deletable_points:
+                if border_points:
                     changed = True
-                    for z, y, x in deletable_points:
+                    for z, y, x in border_points:
                         padded[z,y,x] = 0
             
             if not changed:
@@ -123,74 +127,6 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     print(f"Reduction ratio: {np.sum(centerlines) / np.sum(binary_volume):.4f}")
     
     return centerlines
-
-def matches_deletion_template(neighborhood: np.ndarray, direction: int) -> bool:
-    """
-    Check if a point matches the deletion template for a given direction.
-    Modified to be less aggressive in deletion:
-    1. Requires more neighbors to remain after deletion
-    2. More strict template matching conditions
-    """
-    # Get the center point's neighbors
-    up    = neighborhood[0,1,1]  # U
-    down  = neighborhood[2,1,1]  # D
-    north = neighborhood[1,0,1]  # N
-    south = neighborhood[1,2,1]  # S
-    east  = neighborhood[1,1,2]  # E
-    west  = neighborhood[1,1,0]  # W
-    
-    # Modified: Count remaining neighbors for more conservative deletion
-    def count_remaining_neighbors():
-        return (up == 1) + (down == 1) + (north == 1) + (south == 1) + (east == 1) + (west == 1)
-    
-    # Modified: Check specific template based on direction
-    # Now requires at least 2 remaining neighbors for deletion
-    if direction == 0:   # U-template
-        return up == 0 and count_remaining_neighbors() >= 2 and (down == 1 or (north == 1 and south == 1))
-    elif direction == 1: # D-template
-        return down == 0 and count_remaining_neighbors() >= 2 and (up == 1 or (north == 1 and south == 1))
-    elif direction == 2: # N-template
-        return north == 0 and count_remaining_neighbors() >= 2 and (south == 1 or (up == 1 and down == 1))
-    elif direction == 3: # S-template
-        return south == 0 and count_remaining_neighbors() >= 2 and (north == 1 or (up == 1 and down == 1))
-    elif direction == 4: # E-template
-        return east == 0 and count_remaining_neighbors() >= 2 and (west == 1 or (up == 1 and down == 1))
-    else:               # W-template
-        return west == 0 and count_remaining_neighbors() >= 2 and (east == 1 or (up == 1 and down == 1))
-
-def is_simple_point(neighborhood: np.ndarray) -> bool:
-    """
-    Check if a point is simple (its removal won't change topology).
-    Modified to be less aggressive in point removal:
-    1. More strict neighbor count requirement (at least 2 neighbors)
-    2. More lenient connectivity check
-    """
-    # Count the number of 26-connected components in the 26-neighborhood
-    # excluding the center point
-    center = neighborhood[1,1,1]
-    if center == 0:
-        return False
-        
-    # Temporarily remove center point
-    neighborhood[1,1,1] = 0
-    
-    # Count neighbors before connectivity check
-    # Modified: Require at least 2 neighbors to consider deletion
-    neighbor_count = np.sum(neighborhood)
-    if neighbor_count < 2:  # More conservative than before
-        neighborhood[1,1,1] = center  # Restore center point
-        return False
-    
-    # Modified: Use 26-connectivity for more lenient connection checking
-    labeled, num_components = label(neighborhood, structure=np.ones((3,3,3)))
-    
-    # Restore center point
-    neighborhood[1,1,1] = center
-    
-    # A point is simple if:
-    # 1. There is exactly one 26-connected component in its neighborhood
-    # 2. The point has enough neighbors to maintain structure
-    return num_components == 1 and neighbor_count >= 2  # More conservative condition
 
 def extract_centerlines(binary_vessels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Extract centerlines from binary vessel mask using Palagyi's 6-subiteration thinning."""

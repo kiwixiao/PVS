@@ -351,71 +351,41 @@ def frangi_vesselness(eigenvalues, image_array):
     
     return vesselness
 
-def filter_disconnected_components(binary_mask, min_component_size=50, connectivity=26):
-    """Filter out small disconnected components from binary vessel mask.
+def filter_disconnected_components(binary_vessels: np.ndarray, min_component_size: int = 50, connectivity: int = 26) -> np.ndarray:
+    """Filter out small disconnected components from binary vessel segmentation
     
     Args:
-        binary_mask: Binary vessel mask
+        binary_vessels: Binary vessel segmentation
         min_component_size: Minimum size (in voxels) for a component to be kept
-        connectivity: Connectivity for component labeling (6, 18, or 26)
+        connectivity: Connectivity for labeling (6, 18, or 26)
         
     Returns:
-        Filtered binary mask with small components removed
+        Filtered binary vessel segmentation
     """
-    from scipy.ndimage import label, sum as label_sum
+    from scipy.ndimage import label
     
     # Label connected components
-    structure = None
-    if connectivity == 6:
-        structure = np.array([[[0,0,0],
-                             [0,1,0],
-                             [0,0,0]],
-                            [[0,1,0],
-                             [1,1,1],
-                             [0,1,0]],
-                            [[0,0,0],
-                             [0,1,0],
-                             [0,0,0]]])
-    elif connectivity == 18:
-        structure = np.array([[[0,1,0],
-                             [1,1,1],
-                             [0,1,0]],
-                            [[1,1,1],
-                             [1,1,1],
-                             [1,1,1]],
-                            [[0,1,0],
-                             [1,1,1],
-                             [0,1,0]]])
-    elif connectivity == 26:
-        structure = np.ones((3,3,3))
-    else:
-        raise ValueError("Connectivity must be 6, 18, or 26")
+    labeled, num = label(binary_vessels, structure=np.ones((3,3,3)))
+    print(f"Found {num} connected components")
     
-    # Label components
-    labeled_array, num_features = label(binary_mask, structure=structure)
+    # Get component sizes
+    unique, counts = np.unique(labeled, return_counts=True)
+    sizes = dict(zip(unique[1:], counts[1:]))  # Skip background (label 0)
     
-    if num_features == 0:
-        return binary_mask
-    
-    # Calculate component sizes
-    component_sizes = label_sum(np.ones_like(binary_mask), labeled_array, 
-                              range(1, num_features + 1))
-    
-    print(f"Found {num_features} connected components")
-    print(f"Component size range: {np.min(component_sizes)} to {np.max(component_sizes)} voxels")
-    print(f"Number of components smaller than {min_component_size} voxels: "
-          f"{np.sum(component_sizes < min_component_size)}")
+    # Print statistics
+    print(f"Component size range: {min(sizes.values()):.1f} to {max(sizes.values()):.1f} voxels")
+    small_components = sum(1 for size in sizes.values() if size < min_component_size)
+    print(f"Number of components smaller than {min_component_size} voxels: {small_components}")
     
     # Create mask of components to keep
-    keep_components = np.zeros_like(labeled_array)
-    for i, size in enumerate(component_sizes, start=1):
+    keep_mask = np.zeros_like(labeled)
+    for label_id, size in sizes.items():
         if size >= min_component_size:
-            keep_components[labeled_array == i] = 1
+            keep_mask[labeled == label_id] = 1
     
-    # Calculate statistics
-    removed_volume = np.sum(binary_mask) - np.sum(keep_components)
-    removed_percentage = (removed_volume / np.sum(binary_mask)) * 100
+    # Calculate removed volume
+    removed_voxels = np.sum(binary_vessels) - np.sum(keep_mask)
+    removed_percentage = (removed_voxels / np.sum(binary_vessels)) * 100
+    print(f"Removed {removed_voxels:.1f} voxels ({removed_percentage:.2f}% of original volume)")
     
-    print(f"Removed {removed_volume} voxels ({removed_percentage:.2f}% of original volume)")
-    
-    return keep_components.astype(binary_mask.dtype)
+    return keep_mask

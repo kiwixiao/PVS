@@ -4,7 +4,7 @@ import os
 import argparse
 import json
 from vessel_segmentation.preprocessing import resample_to_isotropic, segment_lungs, process_lung_mask, save_intermediate_results
-from vessel_segmentation.vessel_enhancement import calculate_vesselness, save_vesselness_results, deconvolve_image
+from vessel_segmentation.vessel_enhancement import calculate_vesselness, save_vesselness_results, deconvolve_image, filter_disconnected_components
 from vessel_segmentation.thresholding import calculate_adaptive_threshold, save_threshold_results
 from vessel_segmentation.centerline_extraction import extract_centerlines, save_centerline_results
 from vessel_segmentation.local_thresholding import local_optimal_thresholding, save_local_threshold_results
@@ -179,6 +179,46 @@ def main():
     # Setup output directories
     output_dirs = setup_output_dirs(args.project_name)
     
+    # Check if final vessels exist first
+    final_vessels_path = os.path.join(output_dirs['final'], 'final_vessels.nrrd')
+    if os.path.exists(final_vessels_path):
+        print(f"Found final vessels at {final_vessels_path}")
+        print("Loading final vessels and proceeding with filtering and centerline extraction...")
+        
+        # Load final vessels
+        final_vessels = sitk.GetArrayFromImage(sitk.ReadImage(final_vessels_path))
+        
+        # Filter disconnected components
+        print("\nFiltering disconnected components from final segmentation...")
+        filtered_vessels = filter_disconnected_components(final_vessels, 
+                                                        min_component_size=50,
+                                                        connectivity=26)
+        
+        # Save filtered vessels
+        sitk.WriteImage(
+            sitk.GetImageFromArray(filtered_vessels.astype(np.uint8)),
+            os.path.join(output_dirs['final'], 'filtered_final_vessels.nrrd')
+        )
+        
+        # Extract refined centerlines from filtered segmentation
+        print("Extracting refined centerlines from filtered segmentation...")
+        refined_centerlines, refined_point_types = extract_centerlines(filtered_vessels)
+        
+        # Save refined centerlines
+        print("Saving refined centerlines...")
+        sitk.WriteImage(
+            sitk.GetImageFromArray(refined_centerlines.astype(np.uint8)),
+            os.path.join(output_dirs['final'], 'refined_centerlines.nrrd')
+        )
+        sitk.WriteImage(
+            sitk.GetImageFromArray(refined_point_types),
+            os.path.join(output_dirs['final'], 'refined_centerline_point_types.nrrd')
+        )
+        
+        print("\nProcessing complete!")
+        return
+
+    # If no final vessels found, continue with normal pipeline
     # Check if isotropic image and eroded mask exist
     iso_image_path = os.path.join(output_dirs['intermediate'], 'isotropic_image.nrrd')
     eroded_mask_path = os.path.join(output_dirs['intermediate'], 'eroded_mask.nrrd')
