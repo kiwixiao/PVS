@@ -113,7 +113,7 @@ def process_lung_mask(lung_mask, voxel_spacing):
     
     # Create eroded mask by thresholding the distance map
     # Points with distance > 2 voxels from the boundary are kept
-    eroded_mask = (distance_map > 2).astype(np.uint8)
+    eroded_mask = (distance_map > 5).astype(np.uint8)
     
     return {
         'lung_mask': lung_mask,
