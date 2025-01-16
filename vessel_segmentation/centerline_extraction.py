@@ -8,52 +8,146 @@ from vtk.util import numpy_support
 import gc
 from scipy.ndimage import label
 
-def matches_deletion_template(neighborhood, direction_idx):
-    """Check if point matches deletion template for current direction
-    
-    Args:
-        neighborhood: 3x3x3 binary neighborhood
-        direction_idx: Index of current direction (0=U, 1=D, 2=N, 3=S, 4=E, 5=W)
-        
-    Returns:
-        bool: True if point can be deleted, False otherwise
+def matches_deletion_template(nb: np.ndarray, direction: int) -> bool:
     """
-    # Check if point has background neighbor in current direction
-    if direction_idx == 0:  # U
-        return neighborhood[2,1,1] == 0
-    elif direction_idx == 1:  # D
-        return neighborhood[0,1,1] == 0
-    elif direction_idx == 2:  # N
-        return neighborhood[1,2,1] == 0
-    elif direction_idx == 3:  # S
-        return neighborhood[1,0,1] == 0
-    elif direction_idx == 4:  # E
-        return neighborhood[1,1,2] == 0
-    else:  # W
-        return neighborhood[1,1,0] == 0
+    Check if 3x3x3 neighborhood matches deletion template for given direction.
+    Templates M1-M6 from Figure 3 and their rotations.
+    """
+    # Get base templates for this direction
+    if direction == 0:  # U direction
+        # Template M1
+        if (nb[1,1,2] == 0 and  # point marked U must be 0
+            np.sum(nb[1,:,1]) >= 1 and  # at least one x point must be 1
+            nb[1,1,0] == 1):  # center bottom must be 1
+            return True
+            
+        # Template M2  
+        if (nb[1,1,2] == 0 and
+            nb[1,0,1] == 1 and
+            nb[1,2,1] == 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M3
+        if (nb[1,1,2] == 0 and
+            nb[0,1,1] == 1 and
+            nb[2,1,1] == 1 and 
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M4 
+        if (nb[1,1,2] == 0 and
+            nb[0,0,1] == 1 and
+            nb[2,2,1] == 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M5
+        if (nb[1,1,2] == 0 and
+            np.sum(nb[1,:,1]) >= 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+        # Template M6
+        if (nb[1,1,2] == 0 and
+            nb[1,0,1] == 1 and
+            nb[1,2,1] == 1 and
+            nb[1,1,0] == 1):
+            return True
+            
+    # Other directions - rotate/reflect templates appropriately
+    else:
+        nb = rotate_neighborhood(nb, direction)
+        return matches_deletion_template(nb, 0)
+        
+    return False
 
-def is_simple_point(neighborhood):
-    """Check if point is simple (its removal won't change topology)
-    
-    Args:
-        neighborhood: 3x3x3 binary neighborhood
-        
-    Returns:
-        bool: True if point is simple, False otherwise
+def is_simple_point(nb: np.ndarray) -> bool:
     """
-    center = (1, 1, 1)
+    Check if point is simple according to topology preservation criteria.
+    """
+    # Get counts of 26-connected and 6-connected components
+    n26 = count_26_components(nb)
+    n6 = count_6_components(nb)
     
-    # Count number of connected components in 26-neighborhood
-    # First with center point
-    labeled_with, num_with = label(neighborhood, structure=np.ones((3,3,3)))
+    # Point is simple if:
+    # 1. Single 26-connected component in N26 intersection B
+    # 2. Single 6-connected component in N26 intersection background
+    return n26 == 1 and n6 == 1
+
+def count_26_components(nb: np.ndarray) -> int:
+    """Count number of 26-connected components in 3x3x3 neighborhood"""
+    markers = np.zeros_like(nb)
+    current_label = 1
     
-    # Then without center point
-    temp = neighborhood.copy()
-    temp[center] = 0
-    labeled_without, num_without = label(temp, structure=np.ones((3,3,3)))
+    # Iterate through points
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                if nb[x,y,z] == 1 and markers[x,y,z] == 0:
+                    # Found new component, flood fill
+                    flood_fill_26(nb, markers, x, y, z, current_label)
+                    current_label += 1
+                    
+    return current_label - 1
+
+def count_6_components(nb: np.ndarray) -> int:
+    """Count number of 6-connected components in 3x3x3 neighborhood"""
+    markers = np.zeros_like(nb)
+    current_label = 1
     
-    # Point is simple if removing it doesn't change number of connected components
-    return num_with == num_without
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                if nb[x,y,z] == 1 and markers[x,y,z] == 0:
+                    flood_fill_6(nb, markers, x, y, z, current_label)
+                    current_label += 1
+                    
+    return current_label - 1
+
+def flood_fill_26(nb: np.ndarray, markers: np.ndarray, x: int, y: int, z: int, label: int):
+    """26-connected flood fill"""
+    if x < 0 or x > 2 or y < 0 or y > 2 or z < 0 or z > 2:
+        return
+    if nb[x,y,z] == 0 or markers[x,y,z] != 0:
+        return
+        
+    markers[x,y,z] = label
+    
+    # Recursively fill 26-connected neighbors
+    for dx in [-1,0,1]:
+        for dy in [-1,0,1]:
+            for dz in [-1,0,1]:
+                if dx == dy == dz == 0:
+                    continue
+                flood_fill_26(nb, markers, x+dx, y+dy, z+dz, label)
+
+def flood_fill_6(nb: np.ndarray, markers: np.ndarray, x: int, y: int, z: int, label: int):
+    """6-connected flood fill"""
+    if x < 0 or x > 2 or y < 0 or y > 2 or z < 0 or z > 2:
+        return
+    if nb[x,y,z] == 0 or markers[x,y,z] != 0:
+        return
+        
+    markers[x,y,z] = label
+    
+    # Recursively fill 6-connected neighbors
+    for d in [(0,0,1), (0,0,-1), (0,1,0), (0,-1,0), (1,0,0), (-1,0,0)]:
+        flood_fill_6(nb, markers, x+d[0], y+d[1], z+d[2], label)
+
+def rotate_neighborhood(nb: np.ndarray, direction: int) -> np.ndarray:
+    """Rotate/reflect 3x3x3 neighborhood based on direction"""
+    if direction == 1:  # D - rotate 180 around Y
+        return np.rot90(nb, k=2, axes=(0,2))
+    elif direction == 2:  # N - rotate 90 around X 
+        return np.rot90(nb, k=1, axes=(1,2))
+    elif direction == 3:  # S - rotate -90 around X
+        return np.rot90(nb, k=-1, axes=(1,2))
+    elif direction == 4:  # E - rotate 90 around Y
+        return np.rot90(nb, k=1, axes=(0,2))
+    elif direction == 5:  # W - rotate -90 around Y
+        return np.rot90(nb, k=-1, axes=(0,2))
+    return nb
 
 def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     """
@@ -72,40 +166,51 @@ def thin_vessels_3d(binary_volume: np.ndarray) -> np.ndarray:
     # Pad volume to handle border cases
     padded = np.pad(binary_volume, pad_width=1, mode='constant', constant_values=0)
     
-    # Pre-compute valid region mask to avoid repeated boundary checks
-    valid_region = np.zeros_like(padded, dtype=bool)
-    valid_region[1:-1, 1:-1, 1:-1] = True
-    
     # Continue until no points can be deleted
     iteration = 0
     with tqdm(desc="Thinning iterations", leave=False) as pbar:
         while True:
             changed = False
-            
             # Apply 6 subiterations in order (U,D,N,S,E,W)
-            for direction_idx in range(6):
-                # Find border points
-                border_points = []
-                points = np.argwhere(padded == 1)
+            for direction in range(6):
+                deletable_points = []
                 
-                for z, y, x in points:
-                    if not valid_region[z,y,x]:
-                        continue
+                # Get border points for efficiency
+                border_points = np.argwhere((padded == 1) & 
+                    np.any([np.roll(padded == 0, shift, axis=ax) 
+                           for ax, shift in [(0,1), (0,-1), (1,1), (1,-1), (2,1), (2,-1)]], axis=0))
+                
+                # Process points in batches for memory efficiency
+                batch_size = 1000
+                for i in range(0, len(border_points), batch_size):
+                    batch = border_points[i:i+batch_size]
                     
-                    # Extract neighborhood
-                    neighborhood = padded[z-1:z+2, y-1:y+2, x-1:x+2].copy()
+                    for x, y, z in batch:
+                        # Skip border due to padding
+                        if (x < 1 or y < 1 or z < 1 or 
+                            x >= padded.shape[0]-1 or 
+                            y >= padded.shape[1]-1 or 
+                            z >= padded.shape[2]-1):
+                            continue
+                        
+                        # Get 3x3x3 neighborhood
+                        nb = padded[x-1:x+2, y-1:y+2, z-1:z+2]
+                        
+                        # Check if point matches template for this direction
+                        if matches_deletion_template(nb, direction):
+                            # Check if point is simple
+                            if is_simple_point(nb):
+                                deletable_points.append((x,y,z))
                     
-                    # Check if point matches deletion template
-                    if matches_deletion_template(neighborhood, direction_idx):
-                        # Check if point is simple
-                        if is_simple_point(neighborhood):
-                            border_points.append((z,y,x))
+                    # Periodic garbage collection
+                    if i % 5000 == 0:
+                        gc.collect()
                 
                 # Delete points simultaneously
-                if border_points:
+                if len(deletable_points) > 0:
                     changed = True
-                    for z, y, x in border_points:
-                        padded[z,y,x] = 0
+                    for x,y,z in deletable_points:
+                        padded[x,y,z] = 0
             
             if not changed:
                 break
